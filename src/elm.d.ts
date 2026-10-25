@@ -15,7 +15,7 @@ interface ElmApp {
     saveState: ElmOutPort<unknown>;
     metronome: ElmOutPort<unknown>;
     wakeLock: ElmOutPort<boolean>;
-    chime: ElmOutPort<null>;
+    chime: ElmOutPort<number>;
   };
 }
 

@@ -33,7 +33,7 @@ port metronome : E.Value -> Cmd msg
 port wakeLock : Bool -> Cmd msg
 
 
-port chime : () -> Cmd msg
+port chime : Float -> Cmd msg
 
 
 
@@ -773,7 +773,7 @@ tick now model =
                 case due of
                     Just exerciseId ->
                         ( mapStore (\s -> { s | live = Just { touched | chimed = exerciseId :: touched.chimed } }) model
-                        , chime ()
+                        , chime model.store.settings.volume
                         )
 
                     Nothing ->
@@ -1473,8 +1473,12 @@ viewActive model live a =
             [ text
                 ("start "
                     ++ String.fromInt a.startBpm
-                    ++ " · top now "
-                    ++ String.fromInt a.maxBpm
+                    ++ (if a.maxBpm > 0 then
+                            " · top now " ++ String.fromInt a.maxBpm
+
+                        else
+                            ""
+                       )
                     ++ (lastTop |> Maybe.map (\b -> " · last top " ++ String.fromInt b) |> Maybe.withDefault "")
                 )
             ]
@@ -1618,7 +1622,7 @@ viewSummary model session =
                         [ div [ class "card-title" ] [ text (exerciseName model.store id) ]
                         , div [] [ text (clock (timeOn id)) ]
                         ]
-                    , if Maybe.map .metronome ex |> Maybe.withDefault True then
+                    , if top > 0 && (Maybe.map .metronome ex |> Maybe.withDefault True) then
                         div [ class "muted" ] [ text ("top " ++ String.fromInt top ++ " BPM") ]
 
                       else

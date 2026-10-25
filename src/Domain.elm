@@ -89,6 +89,7 @@ type alias Session =
 while a count-in plays: time only accrues once it has passed. `bpmMark` is
 the elapsed time when the current BPM was set; a BPM only counts towards
 `maxBpm` once it has been played for `settleMs` (so mis-taps don't count).
+`maxBpm` is 0 until some BPM has been played that long.
 -}
 type alias Active =
     { exerciseId : String
@@ -274,7 +275,7 @@ startExercise now ex live =
                     , subdivision = ex.subdivision
                     , metronomeOn = ex.metronome
                     , startBpm = ex.startBpm
-                    , maxBpm = ex.startBpm
+                    , maxBpm = 0
                     , startedAt = now
                     , accumulatedMs = 0
                     , runningSince = Nothing
@@ -476,14 +477,15 @@ exerciseTotals sessions =
 
 topBpmsInSession : Session -> Dict String Int
 topBpmsInSession s =
-    List.foldl
-        (\seg acc ->
-            Dict.update seg.exerciseId
-                (\v -> Just (max seg.maxBpm (Maybe.withDefault 0 v)))
-                acc
-        )
-        Dict.empty
-        s.segments
+    s.segments
+        |> List.filter (\seg -> seg.maxBpm > 0)
+        |> List.foldl
+            (\seg acc ->
+                Dict.update seg.exerciseId
+                    (\v -> Just (max seg.maxBpm (Maybe.withDefault 0 v)))
+                    acc
+            )
+            Dict.empty
 
 
 {-| (session start, top BPM) for every session containing the exercise,

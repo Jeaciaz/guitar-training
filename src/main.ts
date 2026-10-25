@@ -15,18 +15,15 @@ app.ports.saveState.subscribe((state) => {
 // Audio
 
 const audio = new Audio();
-let volume = 0.8;
 
 // Browsers only start audio from a user gesture; unlock on the first touch.
 document.addEventListener("pointerdown", () => audio.unlock(), { capture: true });
 
 app.ports.metronome.subscribe((value) => {
-  const cmd = parseMetronomeCommand(value);
-  if (cmd.running) volume = cmd.volume;
-  audio.apply(cmd);
+  audio.apply(parseMetronomeCommand(value));
 });
 
-app.ports.chime.subscribe(() => {
+app.ports.chime.subscribe((volume) => {
   audio.chime(volume);
   navigator.vibrate?.([200, 100, 200]);
 });

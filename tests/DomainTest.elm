@@ -115,6 +115,23 @@ suite =
                 Domain.finish 40000 live
                     |> Maybe.map (.segments >> List.map .maxBpm)
                     |> Expect.equal (Just [ 110 ])
+        , test "top BPM can be below the start BPM" <|
+            \_ ->
+                Domain.newLive 0 Nothing
+                    |> Domain.startExercise 0 sweeps
+                    |> onActive (Domain.setBpm 0 100)
+                    |> onActive (Domain.resume 0)
+                    |> Domain.finish 60000
+                    |> Maybe.map (.segments >> List.map .maxBpm)
+                    |> Expect.equal (Just [ 100 ])
+        , test "a too-short stretch records no top BPM" <|
+            \_ ->
+                Domain.newLive 0 Nothing
+                    |> Domain.startExercise 0 free
+                    |> onActive (Domain.resume 0)
+                    |> Domain.finish 5000
+                    |> Maybe.map (.segments >> List.map .maxBpm)
+                    |> Expect.equal (Just [ 0 ])
         , test "finish without practice yields no session" <|
             \_ ->
                 Domain.newLive 0 Nothing

@@ -1,0 +1,22 @@
+{
+  "name": "guitar-training",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "elm-test",
+    "format": "elm-format --yes src tests"
+  },
+  "devDependencies": {
+    "elm": "0.19.1-6",
+    "elm-format": "^0.8.8",
+    "elm-test": "0.19.1-revision16",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "vite-plugin-elm": "^3.0.1",
+    "vite-plugin-pwa": "^2.0.0"
+  }
+}

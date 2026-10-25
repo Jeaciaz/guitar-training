@@ -1,0 +1,5 @@
+node_modules
+dist
+elm-stuff
+dev-dist
+.DS_Store

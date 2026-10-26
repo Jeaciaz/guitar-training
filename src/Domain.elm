@@ -10,6 +10,7 @@ module Domain exposing
     , clampBpm
     , countInRemaining
     , dayKey
+    , dedupeItems
     , exerciseTimeInLive
     , exerciseTotals
     , finish
@@ -114,6 +115,22 @@ type alias LiveSession =
     , chimed : List String
     , heartbeat : Int
     }
+
+
+{-| A preset holds each exercise at most once; keep the first occurrence.
+-}
+dedupeItems : List PresetItem -> List PresetItem
+dedupeItems items =
+    List.foldl
+        (\item acc ->
+            if List.any (\i -> i.exerciseId == item.exerciseId) acc then
+                acc
+
+            else
+                acc ++ [ item ]
+        )
+        []
+        items
 
 
 

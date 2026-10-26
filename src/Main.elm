@@ -603,6 +603,7 @@ updateModel msg model =
                                         , minutes = String.toInt it.minutes |> Maybe.withDefault 5 |> clamp 1 600
                                         }
                                     )
+                                |> Domain.dedupeItems
                     in
                     if String.trim f.name == "" then
                         ( { model | notice = Just ( False, "Введите название." ) }, Cmd.none )
@@ -1853,10 +1854,18 @@ viewPresetForm model f =
         exercises =
             List.filter (not << .archived) model.store.exercises
 
+        used =
+            List.map .exerciseId f.items
+
+        -- Each exercise can be in a preset once: a row offers its own
+        -- exercise plus those not used by other rows.
         exerciseOptions selected =
-            List.map
-                (\ex -> option [ value ex.id, Html.Attributes.selected (ex.id == selected) ] [ text ex.name ])
-                exercises
+            exercises
+                |> List.filter (\ex -> ex.id == selected || not (List.member ex.id used))
+                |> List.map (\ex -> option [ value ex.id, Html.Attributes.selected (ex.id == selected) ] [ text ex.name ])
+
+        available =
+            List.filter (\ex -> not (List.member ex.id used)) exercises
 
         total =
             f.items |> List.filterMap (.minutes >> String.toInt) |> List.sum
@@ -1877,12 +1886,16 @@ viewPresetForm model f =
     , div [ class "field" ]
         [ span [] [ text ("Упражнения · " ++ String.fromInt total ++ " мин") ]
         , div [ class "list" ] (List.indexedMap (viewPresetItem model.drag (List.length f.items) exerciseOptions) f.items)
-        , button [ class "btn secondary wide", onClick TogglePicker ] [ text "+ Добавить упражнение" ]
-        , if model.picker then
+        , if List.isEmpty available then
+            text ""
+
+          else
+            button [ class "btn secondary wide", onClick TogglePicker ] [ text "+ Добавить упражнение" ]
+        , if model.picker && not (List.isEmpty available) then
             div [ class "list" ]
                 (List.map
                     (\ex -> button [ class "row-btn", onClick (PrAddItem ex.id) ] [ span [] [ text ex.name ] ])
-                    exercises
+                    available
                 )
 
           else

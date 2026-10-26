@@ -350,7 +350,7 @@ mergeImport idSeed json store =
                                 , presets =
                                     List.foldl
                                         (\( name, items ) ( n, ps ) ->
-                                            ( n + 1, upsertPreset n name (List.filterMap Result.toMaybe items) ps )
+                                            ( n + 1, upsertPreset n name (Domain.dedupeItems (List.filterMap Result.toMaybe items)) ps )
                                         )
                                         ( idSeed, store.presets )
                                         resolved

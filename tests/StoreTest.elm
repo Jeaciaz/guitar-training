@@ -68,6 +68,11 @@ suite =
                 Store.mergeImport 100 """{"exercises":[{"name":"СВОБОДНАЯ игра","bpm":70}]}""" sample
                     |> Result.map (.exercises >> List.map (\e -> ( e.id, e.startBpm )))
                     |> Expect.equal (Ok [ ( "free", 70 ) ])
+        , test "merge import keeps each exercise once per preset" <|
+            \_ ->
+                Store.mergeImport 100 """{"presets":[{"name":"X","items":[{"exercise":"Свободная игра","minutes":3},{"exercise":"свободная игра","minutes":7}]}]}""" sample
+                    |> Result.map (.presets >> List.filter (\p -> p.name == "X") >> List.map (.items >> List.map .minutes))
+                    |> Expect.equal (Ok [ [ 3 ] ])
         , test "merge import reports unknown exercises" <|
             \_ ->
                 Store.mergeImport 100 """{"presets":[{"name":"X","items":[{"exercise":"Nope","minutes":1}]}]}""" sample

@@ -572,3 +572,40 @@ details summary {
   font-size: 20px;
   line-height: 1;
 }
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.drag-handle {
+  flex: none;
+  width: 32px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  color: var(--muted);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.preset-item.settling {
+  transition: transform 0.15s ease;
+}
+
+.preset-item.dragging {
+  position: relative;
+  z-index: 2;
+  background: var(--surface-2);
+  border-radius: 12px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+}
+
+.preset-item.dragging .drag-handle {
+  cursor: grabbing;
+  color: var(--accent);
+}

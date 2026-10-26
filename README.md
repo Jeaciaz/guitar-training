@@ -1,6 +1,6 @@
 # Guitar training
 
-A personal practice-session manager PWA: exercises with a metronome, presets
+A personal practice-session manager PWA (UI in Russian): exercises with a metronome, presets
 with time targets, and practice stats. Elm app with thin strict-TypeScript
 ports (Web Audio metronome, wake lock, localStorage).
 

@@ -1,6 +1,7 @@
 port module Main exposing (main)
 
 import Browser
+import Browser.Events
 import Browser.Navigation as Nav
 import Dict
 import Domain exposing (Active, Exercise, LiveSession, Preset, Session)
@@ -9,7 +10,7 @@ import File.Download
 import File.Select
 import Html exposing (Html, a, button, details, div, h1, h2, input, label, main_, nav, option, p, pre, select, span, summary, text, textarea)
 import Html.Attributes exposing (attribute, checked, class, classList, disabled, href, placeholder, rows, style, title, type_, value)
-import Html.Events exposing (onCheck, onClick, onInput)
+import Html.Events exposing (on, onCheck, onClick, onInput, preventDefaultOn)
 import Json.Decode as D
 import Json.Encode as E
 import Store exposing (Store)
@@ -82,10 +83,22 @@ type alias Model =
     , zone : Time.Zone
     , form : Form
     , picker : Bool
+    , drag : Maybe Drag
     , confirmFinish : Bool
     , confirmDelete : Bool
     , importText : String
     , notice : Maybe ( Bool, String )
+    }
+
+
+{-| A preset item being dragged by its handle. `pitch` is the row height plus
+the list gap, so the drop index follows from how far the pointer moved.
+-}
+type alias Drag =
+    { from : Int
+    , startY : Float
+    , y : Float
+    , pitch : Float
     }
 
 
@@ -103,8 +116,19 @@ init flags url key =
                 |> Maybe.andThen (D.decodeString Store.decoder >> Result.toMaybe)
                 |> Maybe.withDefault Store.empty
 
+        -- Data saved before the app was translated has the English name.
+        renameFreePlay e =
+            if e.id == "free" && e.name == "Free play" then
+                { e | name = "Свободная игра", notes = "Импровизация, джем, просто поиграть. Тоже идёт в общее время." }
+
+            else
+                e
+
         restored =
-            { loaded | live = Maybe.map Domain.restore loaded.live }
+            { loaded
+                | live = Maybe.map Domain.restore loaded.live
+                , exercises = List.map renameFreePlay loaded.exercises
+            }
 
         base =
             { key = key
@@ -114,6 +138,7 @@ init flags url key =
             , zone = Time.utc
             , form = NoForm
             , picker = False
+            , drag = Nothing
             , confirmFinish = False
             , confirmDelete = False
             , importText = ""
@@ -227,7 +252,7 @@ enterRoute : Model -> Model
 enterRoute model =
     let
         reset =
-            { model | picker = False, confirmFinish = False, confirmDelete = False, notice = Nothing }
+            { model | picker = False, drag = Nothing, confirmFinish = False, confirmDelete = False, notice = Nothing }
     in
     case model.route of
         EditExercise id ->
@@ -315,7 +340,9 @@ type Msg
     | PrName String
     | PrItemExercise Int String
     | PrItemMinutes Int String
-    | PrItemMove Int Int
+    | DragStart Int Float Float
+    | DragMove Float
+    | DragEnd
     | PrItemRemove Int
     | PrAddItem String
     | SavePreset
@@ -459,10 +486,10 @@ updateModel msg model =
                 ExForm f ->
                     case ( String.trim f.name, String.toInt f.bpm ) of
                         ( "", _ ) ->
-                            ( { model | notice = Just ( False, "Give it a name." ) }, Cmd.none )
+                            ( { model | notice = Just ( False, "Введите название." ) }, Cmd.none )
 
                         ( _, Nothing ) ->
-                            ( { model | notice = Just ( False, "BPM must be a number." ) }, Cmd.none )
+                            ( { model | notice = Just ( False, "BPM должен быть числом." ) }, Cmd.none )
 
                         ( name, Just bpm ) ->
                             let
@@ -539,18 +566,30 @@ updateModel msg model =
         PrItemMinutes i v ->
             ( mapPrForm (\f -> { f | items = updateAt i (\it -> { it | minutes = v }) f.items }) model, Cmd.none )
 
-        PrItemMove i delta ->
-            ( mapPrForm (\f -> { f | items = move i (i + delta) f.items }) model, Cmd.none )
+        DragStart i y pitch ->
+            ( { model | drag = Just { from = i, startY = y, y = y, pitch = pitch } }, Cmd.none )
+
+        DragMove y ->
+            ( { model | drag = Maybe.map (\d -> { d | y = y }) model.drag }, Cmd.none )
+
+        DragEnd ->
+            case ( model.drag, model.form ) of
+                ( Just d, PrForm f ) ->
+                    ( mapPrForm (\form -> { form | items = move d.from (dropIndex (List.length f.items) d) form.items })
+                        { model | drag = Nothing }
+                    , Cmd.none
+                    )
+
+                _ ->
+                    ( { model | drag = Nothing }, Cmd.none )
 
         PrItemRemove i ->
             ( mapPrForm (\f -> { f | items = List.take i f.items ++ List.drop (i + 1) f.items }) model, Cmd.none )
 
         PrAddItem exId ->
-            if exId == "" then
-                ( model, Cmd.none )
-
-            else
-                ( mapPrForm (\f -> { f | items = f.items ++ [ { exerciseId = exId, minutes = "5" } ] }) model, Cmd.none )
+            ( mapPrForm (\f -> { f | items = f.items ++ [ { exerciseId = exId, minutes = "5" } ] }) { model | picker = False }
+            , Cmd.none
+            )
 
         SavePreset ->
             case model.form of
@@ -566,10 +605,10 @@ updateModel msg model =
                                     )
                     in
                     if String.trim f.name == "" then
-                        ( { model | notice = Just ( False, "Give it a name." ) }, Cmd.none )
+                        ( { model | notice = Just ( False, "Введите название." ) }, Cmd.none )
 
                     else if List.isEmpty items then
-                        ( { model | notice = Just ( False, "Add at least one exercise." ) }, Cmd.none )
+                        ( { model | notice = Just ( False, "Добавьте хотя бы одно упражнение." ) }, Cmd.none )
 
                     else
                         let
@@ -644,7 +683,7 @@ applyImport text model =
             ( { model
                 | store = { store | live = Maybe.map Domain.restore store.live }
                 , importText = ""
-                , notice = Just ( True, "Imported." )
+                , notice = Just ( True, "Импортировано." )
               }
             , Cmd.none
             )
@@ -926,7 +965,7 @@ findPreset store id =
 
 exerciseName : Store -> String -> String
 exerciseName store id =
-    findExercise store id |> Maybe.map .name |> Maybe.withDefault "(deleted)"
+    findExercise store id |> Maybe.map .name |> Maybe.withDefault "(удалено)"
 
 
 updateExercise : String -> (Exercise -> Exercise) -> List Exercise -> List Exercise
@@ -951,6 +990,11 @@ updateAt i f =
             else
                 x
         )
+
+
+dropIndex : Int -> Drag -> Int
+dropIndex count d =
+    clamp 0 (count - 1) (d.from + round ((d.y - d.startY) / d.pitch))
 
 
 move : Int -> Int -> List a -> List a
@@ -1000,7 +1044,7 @@ clock ms =
         String.fromInt m ++ ":" ++ pad2 s
 
 
-{-| "1h 05m" / "23m".
+{-| "1 ч 05 мин" / "23 мин".
 -}
 duration : Int -> String
 duration ms =
@@ -1009,10 +1053,31 @@ duration ms =
             ms // 60000
     in
     if mins >= 60 then
-        String.fromInt (mins // 60) ++ "h " ++ pad2 (modBy 60 mins) ++ "m"
+        String.fromInt (mins // 60) ++ " ч " ++ pad2 (modBy 60 mins) ++ " мин"
 
     else
-        String.fromInt mins ++ "m"
+        String.fromInt mins ++ " мин"
+
+
+{-| Russian plural form for `n`: one (1, 21), few (2–4, 22–24), many.
+-}
+plural : Int -> String -> String -> String -> String
+plural n one few many =
+    let
+        mod10 =
+            modBy 10 n
+
+        mod100 =
+            modBy 100 n
+    in
+    if mod10 == 1 && mod100 /= 11 then
+        one
+
+    else if mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14) then
+        few
+
+    else
+        many
 
 
 dateLabel : Time.Zone -> Int -> String
@@ -1024,63 +1089,63 @@ dateLabel zone millis =
         weekday =
             case Time.toWeekday zone t of
                 Time.Mon ->
-                    "Mon"
+                    "Пн"
 
                 Time.Tue ->
-                    "Tue"
+                    "Вт"
 
                 Time.Wed ->
-                    "Wed"
+                    "Ср"
 
                 Time.Thu ->
-                    "Thu"
+                    "Чт"
 
                 Time.Fri ->
-                    "Fri"
+                    "Пт"
 
                 Time.Sat ->
-                    "Sat"
+                    "Сб"
 
                 Time.Sun ->
-                    "Sun"
+                    "Вс"
 
         month =
             case Time.toMonth zone t of
                 Time.Jan ->
-                    "Jan"
+                    "янв"
 
                 Time.Feb ->
-                    "Feb"
+                    "фев"
 
                 Time.Mar ->
-                    "Mar"
+                    "мар"
 
                 Time.Apr ->
-                    "Apr"
+                    "апр"
 
                 Time.May ->
-                    "May"
+                    "мая"
 
                 Time.Jun ->
-                    "Jun"
+                    "июн"
 
                 Time.Jul ->
-                    "Jul"
+                    "июл"
 
                 Time.Aug ->
-                    "Aug"
+                    "авг"
 
                 Time.Sep ->
-                    "Sep"
+                    "сен"
 
                 Time.Oct ->
-                    "Oct"
+                    "окт"
 
                 Time.Nov ->
-                    "Nov"
+                    "ноя"
 
                 Time.Dec ->
-                    "Dec"
+                    "дек"
     in
     weekday
         ++ " "
@@ -1097,16 +1162,16 @@ subdivisionLabel : Int -> String
 subdivisionLabel n =
     case n of
         2 ->
-            "8ths"
+            "восьмые"
 
         3 ->
-            "triplets"
+            "триоли"
 
         4 ->
-            "16ths"
+            "шестнадцатые"
 
         _ ->
-            "quarters"
+            "четверти"
 
 
 subdivisionIcon : Int -> String
@@ -1131,7 +1196,7 @@ subdivisionIcon n =
 
 view : Model -> Browser.Document Msg
 view model =
-    { title = "Guitar training"
+    { title = "Гитара: тренировки"
     , body =
         [ div [ class "app" ]
             [ main_ [ class "page" ] (viewPage model)
@@ -1153,16 +1218,16 @@ viewNav model =
 
         practice =
             if model.store.live /= Nothing then
-                item SessionRoute "Session" "●"
+                item SessionRoute "Сессия" "●"
 
             else
-                item Home "Practice" "▶"
+                item Home "Тренировка" "▶"
     in
     nav [ class "nav" ]
         [ practice
-        , item Library "Library" "☰"
-        , item Stats "Stats" "▤"
-        , item Settings "Settings" "⚙"
+        , item Library "Библиотека" "☰"
+        , item Stats "Статистика" "▤"
+        , item Settings "Настройки" "⚙"
         ]
 
 
@@ -1208,7 +1273,7 @@ viewPage model =
                     viewSummary model session
 
                 Nothing ->
-                    [ h1 [] [ text "Session not found" ], a [ class "btn", href (routeHref Home) ] [ text "Home" ] ]
+                    [ h1 [] [ text "Сессия не найдена" ], a [ class "btn", href (routeHref Home) ] [ text "На главную" ] ]
 
         Library ->
             viewLibrary model
@@ -1258,26 +1323,26 @@ viewHome model =
         streak =
             Domain.streak model.zone model.now store.sessions
     in
-    [ h1 [] [ text "Practice" ]
+    [ h1 [] [ text "Тренировка" ]
     , div [ class "tiles" ]
-        [ tile "Today" (duration today)
-        , tile "7 days" (duration week)
-        , tile "Streak" (String.fromInt streak ++ "d")
+        [ tile "Сегодня" (duration today)
+        , tile "7 дней" (duration week)
+        , tile "Серия" (String.fromInt streak ++ " " ++ plural streak "день" "дня" "дней")
         ]
     , case store.live of
         Just live ->
             a [ class "card resume", href (routeHref SessionRoute) ]
-                [ div [ class "card-title" ] [ text "Resume session" ]
-                , div [ class "muted" ] [ text (clock (Domain.liveTotal model.now live) ++ " practiced") ]
+                [ div [ class "card-title" ] [ text "Продолжить сессию" ]
+                , div [ class "muted" ] [ text (clock (Domain.liveTotal model.now live) ++ " практики") ]
                 ]
 
         Nothing ->
-            div []
-                [ h2 [] [ text "Presets" ]
+            div [ class "stack" ]
+                [ h2 [] [ text "Пресеты" ]
                 , if List.isEmpty store.presets then
                     p [ class "muted" ]
-                        [ text "No presets yet. "
-                        , a [ href (routeHref (EditPreset Nothing)) ] [ text "Create one" ]
+                        [ text "Пресетов пока нет. "
+                        , a [ href (routeHref (EditPreset Nothing)) ] [ text "Создать" ]
                         , text "."
                         ]
 
@@ -1290,7 +1355,7 @@ viewHome model =
                                     , div [ class "muted" ]
                                         [ text
                                             (String.fromInt (List.sum (List.map .minutes preset.items))
-                                                ++ " min · "
+                                                ++ " мин · "
                                                 ++ String.join ", " (List.map (.exerciseId >> exerciseName store) preset.items)
                                             )
                                         ]
@@ -1298,7 +1363,7 @@ viewHome model =
                             )
                             store.presets
                         )
-                , button [ class "btn big secondary", onClick (Act StartQuick) ] [ text "Quick session" ]
+                , button [ class "btn big secondary", onClick (Act StartQuick) ] [ text "Быстрая сессия" ]
                 ]
     ]
 
@@ -1323,19 +1388,19 @@ viewSession model live =
     in
     [ div [ class "session-head" ]
         [ div []
-            [ div [ class "muted small" ] [ text (preset |> Maybe.map .name |> Maybe.withDefault "Quick session") ]
+            [ div [ class "muted small" ] [ text (preset |> Maybe.map .name |> Maybe.withDefault "Быстрая сессия") ]
             , div [ class "session-total" ] [ text (clock (Domain.liveTotal model.now live)) ]
             ]
-        , button [ class "btn secondary", onClick (AskFinish True) ] [ text "Finish" ]
+        , button [ class "btn secondary", onClick (AskFinish True) ] [ text "Завершить" ]
         ]
     , if model.confirmFinish then
         div [ class "card confirm" ]
-            [ p [] [ text "Finish this session?" ]
+            [ p [] [ text "Завершить сессию?" ]
             , div [ class "row" ]
-                [ button [ class "btn", onClick (Act FinishSession) ] [ text "Save & finish" ]
-                , button [ class "btn secondary", onClick (AskFinish False) ] [ text "Keep going" ]
+                [ button [ class "btn", onClick (Act FinishSession) ] [ text "Сохранить и завершить" ]
+                , button [ class "btn secondary", onClick (AskFinish False) ] [ text "Продолжить" ]
                 ]
-            , button [ class "link danger", onClick DiscardSession ] [ text "Discard session" ]
+            , button [ class "link danger", onClick DiscardSession ] [ text "Удалить сессию" ]
             ]
 
       else
@@ -1345,7 +1410,7 @@ viewSession model live =
             viewActive model live a
 
         Nothing ->
-            p [ class "muted" ] [ text "Pick an exercise to start." ]
+            p [ class "muted" ] [ text "Выберите упражнение." ]
     , case preset of
         Just pr ->
             viewQueue model live pr
@@ -1355,10 +1420,10 @@ viewSession model live =
     , button [ class "btn secondary wide", onClick TogglePicker ]
         [ text
             (if model.picker then
-                "Hide exercises"
+                "Скрыть упражнения"
 
              else
-                "Switch exercise…"
+                "Сменить упражнение…"
             )
         ]
     , if model.picker then
@@ -1431,7 +1496,7 @@ viewActive model live a =
                 ]
     in
     div [ class "card active-card" ]
-        [ div [ class "ex-name" ] [ text (ex |> Maybe.map .name |> Maybe.withDefault "(deleted)") ]
+        [ div [ class "ex-name" ] [ text (ex |> Maybe.map .name |> Maybe.withDefault "(удалено)") ]
         , case ex |> Maybe.map .notes |> Maybe.withDefault "" of
             "" ->
                 text ""
@@ -1471,15 +1536,15 @@ viewActive model live a =
             ]
         , div [ class "bpm-meta muted small" ]
             [ text
-                ("start "
+                ("старт "
                     ++ String.fromInt a.startBpm
                     ++ (if a.maxBpm > 0 then
-                            " · top now " ++ String.fromInt a.maxBpm
+                            " · макс сейчас " ++ String.fromInt a.maxBpm
 
                         else
                             ""
                        )
-                    ++ (lastTop |> Maybe.map (\b -> " · last top " ++ String.fromInt b) |> Maybe.withDefault "")
+                    ++ (lastTop |> Maybe.map (\b -> " · прошлый макс " ++ String.fromInt b) |> Maybe.withDefault "")
                 )
             ]
         , div [ class "seg" ]
@@ -1499,10 +1564,10 @@ viewActive model live a =
                         ]
                         [ text
                             (if a.metronomeOn then
-                                "click on"
+                                "клик вкл"
 
                              else
-                                "click off"
+                                "клик выкл"
                             )
                         ]
                    ]
@@ -1513,13 +1578,13 @@ viewActive model live a =
             ]
             [ text
                 (if countIn > 0 then
-                    "count-in… " ++ String.fromInt (ceiling (toFloat countIn * toFloat a.bpm / 60000))
+                    "отсчёт… " ++ String.fromInt (ceiling (toFloat countIn * toFloat a.bpm / 60000))
 
                  else if running then
-                    "❚❚ Pause"
+                    "❚❚ Пауза"
 
                  else
-                    "▶ Play"
+                    "▶ Играть"
                 )
             ]
         ]
@@ -1565,7 +1630,7 @@ viewQueue model live preset =
                                     ++ exerciseName model.store item.exerciseId
                                 )
                             ]
-                        , span [ class "muted" ] [ text (clock spent ++ " / " ++ String.fromInt item.minutes ++ "m") ]
+                        , span [ class "muted" ] [ text (clock spent ++ " / " ++ String.fromInt item.minutes ++ " мин") ]
                         ]
                 )
                 preset.items
@@ -1574,7 +1639,7 @@ viewQueue model live preset =
             [ classList [ ( "btn big next", True ), ( "glow", currentDone ) ]
             , onClick (Act NextExercise)
             ]
-            [ text "Next ▸" ]
+            [ text "Далее ▸" ]
         ]
 
 
@@ -1604,9 +1669,9 @@ viewSummary model session =
         timeOn id =
             session.segments |> List.filter (\s -> s.exerciseId == id) |> List.map .durationMs |> List.sum
     in
-    [ h1 [] [ text "Session" ]
+    [ h1 [] [ text "Сессия" ]
     , p [ class "muted" ] [ text (dateLabel model.zone session.startedAt) ]
-    , div [ class "tiles" ] [ tile "Practiced" (clock (Domain.sessionTotal session)) ]
+    , div [ class "tiles" ] [ tile "Время" (clock (Domain.sessionTotal session)) ]
     , div [ class "list" ]
         (List.map
             (\id ->
@@ -1623,7 +1688,7 @@ viewSummary model session =
                         , div [] [ text (clock (timeOn id)) ]
                         ]
                     , if top > 0 && (Maybe.map .metronome ex |> Maybe.withDefault True) then
-                        div [ class "muted" ] [ text ("top " ++ String.fromInt top ++ " BPM") ]
+                        div [ class "muted" ] [ text ("макс " ++ String.fromInt top ++ " BPM") ]
 
                       else
                         text ""
@@ -1631,10 +1696,10 @@ viewSummary model session =
                         Just e ->
                             if e.metronome && top > e.startBpm then
                                 button [ class "btn small", onClick (PromoteBpm id top) ]
-                                    [ text ("Make " ++ String.fromInt top ++ " the start BPM (now " ++ String.fromInt e.startBpm ++ ")") ]
+                                    [ text ("Сделать " ++ String.fromInt top ++ " стартовым BPM (сейчас " ++ String.fromInt e.startBpm ++ ")") ]
 
                             else if top == e.startBpm && top > 0 then
-                                div [ class "muted small" ] [ text ("Start BPM: " ++ String.fromInt e.startBpm) ]
+                                div [ class "muted small" ] [ text ("Стартовый BPM: " ++ String.fromInt e.startBpm) ]
 
                             else
                                 text ""
@@ -1645,15 +1710,15 @@ viewSummary model session =
             )
             exerciseIds
         )
-    , a [ class "btn big", href (routeHref Home) ] [ text "Done" ]
+    , a [ class "btn big", href (routeHref Home) ] [ text "Готово" ]
     , if model.confirmDelete then
         div [ class "row" ]
-            [ button [ class "btn danger", onClick (DeleteSession session.id) ] [ text "Delete for good" ]
-            , button [ class "btn secondary", onClick (AskDelete False) ] [ text "Cancel" ]
+            [ button [ class "btn danger", onClick (DeleteSession session.id) ] [ text "Удалить навсегда" ]
+            , button [ class "btn secondary", onClick (AskDelete False) ] [ text "Отмена" ]
             ]
 
       else
-        button [ class "link danger", onClick (AskDelete True) ] [ text "Delete this session" ]
+        button [ class "link danger", onClick (AskDelete True) ] [ text "Удалить эту сессию" ]
     ]
 
 
@@ -1667,20 +1732,20 @@ viewLibrary model =
         ( active, archived ) =
             List.partition (not << .archived) model.store.exercises
     in
-    [ h1 [] [ text "Library" ]
-    , h2 [] [ text "Presets" ]
+    [ h1 [] [ text "Библиотека" ]
+    , h2 [] [ text "Пресеты" ]
     , div [ class "list" ]
         (List.map
             (\pr ->
                 a [ class "row-btn", href (routeHref (EditPreset (Just pr.id))) ]
                     [ span [] [ text pr.name ]
-                    , span [ class "muted" ] [ text (String.fromInt (List.sum (List.map .minutes pr.items)) ++ " min") ]
+                    , span [ class "muted" ] [ text (String.fromInt (List.sum (List.map .minutes pr.items)) ++ " мин") ]
                     ]
             )
             model.store.presets
         )
-    , a [ class "btn secondary wide", href (routeHref (EditPreset Nothing)) ] [ text "+ New preset" ]
-    , h2 [] [ text "Exercises" ]
+    , a [ class "btn secondary wide", href (routeHref (EditPreset Nothing)) ] [ text "+ Новый пресет" ]
+    , h2 [] [ text "Упражнения" ]
     , div [ class "list" ]
         (List.map
             (\ex ->
@@ -1692,26 +1757,26 @@ viewLibrary model =
                                 String.fromInt ex.startBpm ++ " BPM " ++ subdivisionIcon ex.subdivision
 
                              else
-                                "no click"
+                                "без клика"
                             )
                         ]
                     ]
             )
             active
         )
-    , a [ class "btn secondary wide", href (routeHref (EditExercise Nothing)) ] [ text "+ New exercise" ]
+    , a [ class "btn secondary wide", href (routeHref (EditExercise Nothing)) ] [ text "+ Новое упражнение" ]
     , if List.isEmpty archived then
         text ""
 
       else
         details []
-            [ summary [ class "muted" ] [ text ("Archived (" ++ String.fromInt (List.length archived) ++ ")") ]
+            [ summary [ class "muted" ] [ text ("Архив (" ++ String.fromInt (List.length archived) ++ ")") ]
             , div [ class "list" ]
                 (List.map
                     (\ex ->
                         div [ class "row-btn" ]
                             [ span [] [ text ex.name ]
-                            , button [ class "link", onClick (RestoreExercise ex.id) ] [ text "Restore" ]
+                            , button [ class "link", onClick (RestoreExercise ex.id) ] [ text "Вернуть" ]
                             ]
                     )
                     archived
@@ -1735,22 +1800,22 @@ viewExerciseForm model f =
     [ h1 []
         [ text
             (if f.id == Nothing then
-                "New exercise"
+                "Новое упражнение"
 
              else
-                "Edit exercise"
+                "Упражнение"
             )
         ]
     , label [ class "field" ]
-        [ span [] [ text "Name" ]
-        , input [ value f.name, onInput ExName, placeholder "Sweep arpeggios, A minor" ] []
+        [ span [] [ text "Название" ]
+        , input [ value f.name, onInput ExName, placeholder "Свип-арпеджио, ля минор" ] []
         ]
     , label [ class "field" ]
-        [ span [] [ text "Start BPM" ]
+        [ span [] [ text "Стартовый BPM" ]
         , input [ type_ "number", attribute "inputmode" "numeric", value f.bpm, onInput ExBpm ] []
         ]
     , div [ class "field" ]
-        [ span [] [ text "Clicks per beat" ]
+        [ span [] [ text "Кликов на долю" ]
         , div [ class "seg" ]
             (List.map
                 (\n ->
@@ -1765,17 +1830,17 @@ viewExerciseForm model f =
         ]
     , label [ class "field check" ]
         [ input [ type_ "checkbox", checked f.metronome, onCheck ExMetronome ] []
-        , span [] [ text "Metronome on by default" ]
+        , span [] [ text "Метроном включён по умолчанию" ]
         ]
     , label [ class "field" ]
-        [ span [] [ text "Notes" ]
-        , textarea [ value f.notes, onInput ExNotes, rows 3, placeholder "Tab link, focus points…" ] []
+        [ span [] [ text "Заметки" ]
+        , textarea [ value f.notes, onInput ExNotes, rows 3, placeholder "Ссылка на табы, на чём сосредоточиться…" ] []
         ]
     , viewNotice model
-    , button [ class "btn big", onClick SaveExercise ] [ text "Save" ]
+    , button [ class "btn big", onClick SaveExercise ] [ text "Сохранить" ]
     , case f.id of
         Just id ->
-            button [ class "link danger", onClick (DeleteExercise id) ] [ text "Delete exercise" ]
+            button [ class "link danger", onClick (DeleteExercise id) ] [ text "Удалить упражнение" ]
 
         Nothing ->
             text ""
@@ -1799,51 +1864,98 @@ viewPresetForm model f =
     [ h1 []
         [ text
             (if f.id == Nothing then
-                "New preset"
+                "Новый пресет"
 
              else
-                "Edit preset"
+                "Пресет"
             )
         ]
     , label [ class "field" ]
-        [ span [] [ text "Name" ]
-        , input [ value f.name, onInput PrName, placeholder "Daily" ] []
+        [ span [] [ text "Название" ]
+        , input [ value f.name, onInput PrName, placeholder "Ежедневный" ] []
         ]
     , div [ class "field" ]
-        [ span [] [ text ("Exercises · " ++ String.fromInt total ++ " min") ]
-        , div [ class "list" ]
-            (List.indexedMap
-                (\i item ->
-                    div [ class "preset-item" ]
-                        [ select [ onInput (PrItemExercise i) ] (exerciseOptions item.exerciseId)
-                        , input
-                            [ type_ "number"
-                            , attribute "inputmode" "numeric"
-                            , class "minutes"
-                            , value item.minutes
-                            , onInput (PrItemMinutes i)
-                            ]
-                            []
-                        , span [ class "muted" ] [ text "min" ]
-                        , button [ class "icon-btn", onClick (PrItemMove i -1) ] [ text "↑" ]
-                        , button [ class "icon-btn", onClick (PrItemMove i 1) ] [ text "↓" ]
-                        , button [ class "icon-btn danger", onClick (PrItemRemove i) ] [ text "✕" ]
-                        ]
+        [ span [] [ text ("Упражнения · " ++ String.fromInt total ++ " мин") ]
+        , div [ class "list" ] (List.indexedMap (viewPresetItem model.drag (List.length f.items) exerciseOptions) f.items)
+        , button [ class "btn secondary wide", onClick TogglePicker ] [ text "+ Добавить упражнение" ]
+        , if model.picker then
+            div [ class "list" ]
+                (List.map
+                    (\ex -> button [ class "row-btn", onClick (PrAddItem ex.id) ] [ span [] [ text ex.name ] ])
+                    exercises
                 )
-                f.items
-            )
-        , select [ class "add-item", onInput PrAddItem, value "" ]
-            (option [ value "" ] [ text "+ Add exercise…" ] :: exerciseOptions "")
+
+          else
+            text ""
         ]
     , viewNotice model
-    , button [ class "btn big", onClick SavePreset ] [ text "Save" ]
+    , button [ class "btn big", onClick SavePreset ] [ text "Сохранить" ]
     , case f.id of
         Just id ->
-            button [ class "link danger", onClick (DeletePreset id) ] [ text "Delete preset" ]
+            button [ class "link danger", onClick (DeletePreset id) ] [ text "Удалить пресет" ]
 
         Nothing ->
             text ""
     ]
+
+
+viewPresetItem : Maybe Drag -> Int -> (String -> List (Html Msg)) -> Int -> { exerciseId : String, minutes : String } -> Html Msg
+viewPresetItem drag count exerciseOptions i item =
+    let
+        px v =
+            "translateY(" ++ String.fromFloat v ++ "px)"
+
+        ( dragging, shift ) =
+            case drag of
+                Just d ->
+                    let
+                        target =
+                            dropIndex count d
+                    in
+                    if i == d.from then
+                        ( True, px (d.y - d.startY) )
+
+                    else if d.from < i && i <= target then
+                        ( False, px -d.pitch )
+
+                    else if target <= i && i < d.from then
+                        ( False, px d.pitch )
+
+                    else
+                        ( False, "none" )
+
+                Nothing ->
+                    ( False, "none" )
+
+        startDrag =
+            D.map2 (\y height -> ( DragStart i y (height + 8), True ))
+                (D.field "clientY" D.float)
+                (D.at [ "currentTarget", "parentElement", "offsetHeight" ] D.float)
+    in
+    div [ classList [ ( "preset-item", True ), ( "dragging", dragging ), ( "settling", drag /= Nothing && not dragging ) ], style "transform" shift ]
+        [ span
+            [ class "drag-handle"
+            , preventDefaultOn "pointerdown" startDrag
+
+            -- Touch pointers are implicitly captured by the handle, so its own
+            -- move/up events keep coming while the finger leaves it.
+            , on "pointermove" (D.map DragMove (D.field "clientY" D.float))
+            , on "pointerup" (D.succeed DragEnd)
+            , on "pointercancel" (D.succeed DragEnd)
+            ]
+            [ text "⠿" ]
+        , select [ onInput (PrItemExercise i) ] (exerciseOptions item.exerciseId)
+        , input
+            [ type_ "number"
+            , attribute "inputmode" "numeric"
+            , class "minutes"
+            , value item.minutes
+            , onInput (PrItemMinutes i)
+            ]
+            []
+        , span [ class "muted" ] [ text "мин" ]
+        , button [ class "icon-btn danger", onClick (PrItemRemove i) ] [ text "✕" ]
+        ]
 
 
 
@@ -1896,13 +2008,13 @@ viewStats model =
         ranked =
             Dict.toList totals |> List.sortBy (Tuple.second >> negate)
     in
-    [ h1 [] [ text "Stats" ]
+    [ h1 [] [ text "Статистика" ]
     , div [ class "tiles" ]
-        [ tile "7 days" (duration (lastDays model 7 |> List.map Tuple.second |> List.sum))
-        , tile "All time" (duration all)
-        , tile "Sessions" (String.fromInt (List.length sessions))
+        [ tile "7 дней" (duration (lastDays model 7 |> List.map Tuple.second |> List.sum))
+        , tile "Всего" (duration all)
+        , tile "Сессий" (String.fromInt (List.length sessions))
         ]
-    , h2 [] [ text "Last 14 days" ]
+    , h2 [] [ text "Последние 14 дней" ]
     , div [ class "bars" ]
         (List.map
             (\( label, ms ) ->
@@ -1923,9 +2035,9 @@ viewStats model =
             )
             days
         )
-    , h2 [] [ text "Exercises" ]
+    , h2 [] [ text "Упражнения" ]
     , if List.isEmpty ranked then
-        p [ class "muted" ] [ text "Nothing yet. Go play!" ]
+        p [ class "muted" ] [ text "Пока пусто. Иди играть!" ]
 
       else
         div [ class "list" ]
@@ -1949,7 +2061,7 @@ viewStats model =
                 )
                 ranked
             )
-    , h2 [] [ text "History" ]
+    , h2 [] [ text "История" ]
     , div [ class "list" ]
         (sessions
             |> List.take 30
@@ -2022,20 +2134,16 @@ viewBpmHistory history =
                         ]
                 , div [ class "muted small" ]
                     [ text
-                        ("top BPM "
+                        ("макс BPM "
                             ++ String.fromInt first
                             ++ " → "
                             ++ String.fromInt latest
-                            ++ " · best "
+                            ++ " · лучший "
                             ++ String.fromInt hi
                             ++ " · "
                             ++ String.fromInt n
-                            ++ (if n == 1 then
-                                    " session"
-
-                                else
-                                    " sessions"
-                               )
+                            ++ " "
+                            ++ plural n "сессия" "сессии" "сессий"
                         )
                     ]
                 ]
@@ -2050,9 +2158,9 @@ viewBpmHistory history =
 
 viewSettings : Model -> List (Html Msg)
 viewSettings model =
-    [ h1 [] [ text "Settings" ]
+    [ h1 [] [ text "Настройки" ]
     , label [ class "field" ]
-        [ span [] [ text ("Click volume · " ++ String.fromInt (round (model.store.settings.volume * 100)) ++ "%") ]
+        [ span [] [ text ("Громкость клика · " ++ String.fromInt (round (model.store.settings.volume * 100)) ++ "%") ]
         , input
             [ type_ "range"
             , Html.Attributes.min "0"
@@ -2063,20 +2171,20 @@ viewSettings model =
             ]
             []
         ]
-    , h2 [] [ text "Backup" ]
-    , p [ class "muted small" ] [ text "All data lives on this phone. Export now and then to keep a copy." ]
+    , h2 [] [ text "Резервная копия" ]
+    , p [ class "muted small" ] [ text "Все данные хранятся только на этом телефоне. Время от времени делай экспорт, чтобы их не потерять." ]
     , div [ class "row" ]
-        [ button [ class "btn secondary", onClick Export ] [ text "Export backup" ]
-        , button [ class "btn secondary", onClick ImportFile ] [ text "Import file" ]
+        [ button [ class "btn secondary", onClick Export ] [ text "Экспорт" ]
+        , button [ class "btn secondary", onClick ImportFile ] [ text "Импорт из файла" ]
         ]
-    , h2 [] [ text "Paste JSON" ]
+    , h2 [] [ text "Вставить JSON" ]
     , p [ class "muted small" ]
-        [ text "Add or update exercises and presets (matched by name). History is never touched. Pasting a full backup replaces everything." ]
+        [ text "Добавляет или обновляет упражнения и пресеты (по названию). История не меняется. Полная резервная копия заменяет всё." ]
     , textarea [ class "paste", value model.importText, onInput ImportTextChanged, rows 6, placeholder importExample ] []
     , viewNotice model
-    , button [ class "btn", onClick ApplyImport, disabled (String.trim model.importText == "") ] [ text "Import" ]
+    , button [ class "btn", onClick ApplyImport, disabled (String.trim model.importText == "") ] [ text "Импортировать" ]
     , details []
-        [ summary [ class "muted" ] [ text "Format" ]
+        [ summary [ class "muted" ] [ text "Формат" ]
         , pre [ class "code" ] [ text importExample ]
         ]
     ]
@@ -2086,12 +2194,12 @@ importExample : String
 importExample =
     """{
   "exercises": [
-    { "name": "Sweeps Am", "bpm": 90, "subdivision": 3,
-      "metronome": true, "notes": "5-string shape" }
+    { "name": "Свипы Am", "bpm": 90, "subdivision": 3,
+      "metronome": true, "notes": "5 струн" }
   ],
   "presets": [
-    { "name": "Daily", "items": [
-      { "exercise": "Sweeps Am", "minutes": 10 }
+    { "name": "Ежедневный", "items": [
+      { "exercise": "Свипы Am", "minutes": 10 }
     ] }
   ]
 }"""
@@ -2103,11 +2211,23 @@ importExample =
 
 subscriptions : Model -> Sub Msg
 subscriptions model =
-    if model.store.live /= Nothing then
-        Time.every 250 (\_ -> Act Tick)
+    Sub.batch
+        [ if model.store.live /= Nothing then
+            Time.every 250 (\_ -> Act Tick)
 
-    else
-        Time.every 30000 (\_ -> Act Tick)
+          else
+            Time.every 30000 (\_ -> Act Tick)
+
+        -- A mouse isn't captured by the drag handle; follow it document-wide.
+        , if model.drag /= Nothing then
+            Sub.batch
+                [ Browser.Events.onMouseMove (D.map DragMove (D.field "clientY" D.float))
+                , Browser.Events.onMouseUp (D.succeed DragEnd)
+                ]
+
+          else
+            Sub.none
+        ]
 
 
 main : Program Flags Model Msg

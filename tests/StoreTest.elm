@@ -16,7 +16,7 @@ sample =
 
         live =
             Domain.newLive 5 (Just "p1")
-                |> Domain.startExercise 5 { id = "free", name = "Free play", startBpm = 100, subdivision = 1, metronome = False, notes = "", archived = False }
+                |> Domain.startExercise 5 { id = "free", name = "Свободная игра", startBpm = 100, subdivision = 1, metronome = False, notes = "", archived = False }
     in
     { base
         | presets = [ { id = "p1", name = "Daily", items = [ { exerciseId = "free", minutes = 5 } ] } ]
@@ -46,7 +46,7 @@ suite =
                 let
                     json =
                         """{"exercises":[{"name":"Sweeps","bpm":90,"subdivision":3}],
-                            "presets":[{"name":"Evening","items":[{"exercise":"sweeps","minutes":10},{"exercise":"Free play","minutes":5}]}]}"""
+                            "presets":[{"name":"Evening","items":[{"exercise":"sweeps","minutes":10},{"exercise":"свободная ИГРА","minutes":5}]}]}"""
                 in
                 Store.mergeImport 100 json sample
                     |> Result.map
@@ -58,20 +58,20 @@ suite =
                         )
                     |> Expect.equal
                         (Ok
-                            ( [ ( "Free play", 100, 1 ), ( "Sweeps", 90, 3 ) ]
+                            ( [ ( "Свободная игра", 100, 1 ), ( "Sweeps", 90, 3 ) ]
                             , [ ( "Daily", [ 5 ] ), ( "Evening", [ 10, 5 ] ) ]
                             , 1
                             )
                         )
         , test "merge import updates an existing exercise by name" <|
             \_ ->
-                Store.mergeImport 100 """{"exercises":[{"name":"free PLAY","bpm":70}]}""" sample
+                Store.mergeImport 100 """{"exercises":[{"name":"СВОБОДНАЯ игра","bpm":70}]}""" sample
                     |> Result.map (.exercises >> List.map (\e -> ( e.id, e.startBpm )))
                     |> Expect.equal (Ok [ ( "free", 70 ) ])
         , test "merge import reports unknown exercises" <|
             \_ ->
                 Store.mergeImport 100 """{"presets":[{"name":"X","items":[{"exercise":"Nope","minutes":1}]}]}""" sample
-                    |> Expect.equal (Err "Unknown exercises in presets: Nope")
+                    |> Expect.equal (Err "Неизвестные упражнения в пресетах: Nope")
         , test "a full backup replaces everything" <|
             \_ ->
                 Store.mergeImport 100 (E.encode 0 (Store.encode sample)) Store.empty

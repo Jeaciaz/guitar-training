@@ -41,11 +41,11 @@ empty : Store
 empty =
     { exercises =
         [ { id = "free"
-          , name = "Free play"
+          , name = "Свободная игра"
           , startBpm = 100
           , subdivision = 1
           , metronome = False
-          , notes = "Noodling, improvising, jamming. Counts towards practice time."
+          , notes = "Импровизация, джем, просто поиграть. Тоже идёт в общее время."
           , archived = False
           }
         ]
@@ -318,12 +318,12 @@ mergeImport idSeed json store =
     case D.decodeString (D.field "version" D.int) json of
         Ok _ ->
             D.decodeString decoder json
-                |> Result.mapError (\_ -> "That looks like a backup, but it couldn't be read.")
+                |> Result.mapError (\_ -> "Похоже на резервную копию, но её не удалось прочитать.")
 
         Err _ ->
             case D.decodeString importDecoder json of
                 Err err ->
-                    Err ("Couldn't read JSON: " ++ D.errorToString err)
+                    Err ("Не удалось прочитать JSON: " ++ D.errorToString err)
 
                 Ok ( exs, presets ) ->
                     let
@@ -358,7 +358,7 @@ mergeImport idSeed json store =
                             }
 
                     else
-                        Err ("Unknown exercises in presets: " ++ String.join ", " missing)
+                        Err ("Неизвестные упражнения в пресетах: " ++ String.join ", " missing)
 
 
 errorOf : Result e a -> Maybe e

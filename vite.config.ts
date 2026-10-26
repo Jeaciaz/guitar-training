@@ -10,9 +10,10 @@ export default defineConfig({
       registerType: "autoUpdate",
       includeAssets: ["icon.svg"],
       manifest: {
-        name: "Guitar training",
-        short_name: "Guitar",
-        description: "Practice session manager with metronome",
+        name: "Гитара: тренировки",
+        short_name: "Гитара",
+        description: "Тренировки на гитаре с метрономом",
+        lang: "ru",
         display: "standalone",
         orientation: "portrait",
         background_color: "#111214",

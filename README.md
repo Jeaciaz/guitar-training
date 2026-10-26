@@ -19,6 +19,8 @@ Live: https://jeaciaz.github.io/guitar-training/ (on Android Chrome: menu → "I
   start BPM".
 - **Forgot to finish?** A session paused for 30+ minutes is saved and closed
   automatically.
+- **Variants**: open any exercise → "Клонировать в вариант" to make a specific
+  version (e.g. Лик → Blues @ 90). Stats roll variants up under their generic.
 - **Data** lives in the phone's localStorage. Settings → Export backup /
   Import file for backups.
 
@@ -30,19 +32,21 @@ and never touches history. Ask Claude to produce JSON in this shape and paste it
 ```json
 {
   "exercises": [
-    { "name": "Sweeps Am", "bpm": 90, "subdivision": 3, "metronome": true, "notes": "5-string shape" }
+    { "name": "Am", "parent": "Свип-арпеджио", "bpm": 90, "subdivision": 3, "notes": "5-string shape" }
   ],
   "presets": [
-    { "name": "Daily", "items": [ { "exercise": "Sweeps Am", "minutes": 10 } ] }
+    { "name": "Daily", "items": [ { "exercise": "Свип-арпеджио · Am", "minutes": 10 } ] }
   ]
 }
 ```
 
+- `parent`: optional; makes the exercise a variant of that generic exercise
+  (shown as "Свип-арпеджио · Am").
 - `subdivision`: clicks per beat — 1 quarters, 2 eighths, 3 triplets, 4 sixteenths.
 - All exercise fields except `name` are optional. An existing exercise with
   the same name is updated with the fields you give.
 - A preset with the same name is replaced. Preset items reference exercises
-  by name (existing or in the same paste).
+  by display name ("Лик · Blues") or plain name when unambiguous.
 - Pasting a full backup (it has a `version` field) replaces everything.
 
 ## Development

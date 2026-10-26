@@ -9,7 +9,7 @@ import Time
 
 ex : String -> Int -> Bool -> Exercise
 ex id bpm click =
-    { id = id, name = id, startBpm = bpm, subdivision = 1, metronome = click, notes = "", archived = False }
+    { id = id, name = id, startBpm = bpm, subdivision = 1, metronome = click, notes = "", archived = False, parentId = Nothing }
 
 
 sweeps : Exercise

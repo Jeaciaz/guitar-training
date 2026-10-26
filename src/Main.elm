@@ -47,6 +47,7 @@ type Route
     | Summary String
     | Library
     | EditExercise (Maybe String)
+    | NewVariant String
     | EditPreset (Maybe String)
     | Stats
     | Settings
@@ -54,6 +55,7 @@ type Route
 
 type alias ExerciseForm =
     { id : Maybe String
+    , parentId : Maybe String
     , name : String
     , bpm : String
     , subdivision : Int
@@ -186,6 +188,9 @@ parseRoute url =
         [ "exercise", "new" ] ->
             EditExercise Nothing
 
+        [ "exercise", "variant", id ] ->
+            NewVariant id
+
         [ "exercise", id ] ->
             EditExercise (Just id)
 
@@ -227,6 +232,9 @@ routeHref route =
                 EditExercise (Just id) ->
                     "exercise/" ++ id
 
+                NewVariant id ->
+                    "exercise/variant/" ++ id
+
                 EditPreset Nothing ->
                     "preset/new"
 
@@ -264,13 +272,34 @@ enterRoute model =
                 | form =
                     ExForm
                         { id = Maybe.map .id existing
+                        , parentId = existing |> Maybe.andThen .parentId
                         , name = existing |> Maybe.map .name |> Maybe.withDefault ""
-                        , bpm = existing |> Maybe.map (.startBpm >> String.fromInt) |> Maybe.withDefault "80"
+                        , bpm = existing |> Maybe.map (.startBpm >> String.fromInt) |> Maybe.withDefault "60"
                         , subdivision = existing |> Maybe.map .subdivision |> Maybe.withDefault 1
                         , metronome = existing |> Maybe.map .metronome |> Maybe.withDefault True
                         , notes = existing |> Maybe.map .notes |> Maybe.withDefault ""
                         }
             }
+
+        NewVariant sourceId ->
+            -- Cloning a variant makes a sibling: variants are one level deep.
+            case findExercise model.store sourceId of
+                Just source ->
+                    { reset
+                        | form =
+                            ExForm
+                                { id = Nothing
+                                , parentId = Just (Maybe.withDefault source.id source.parentId)
+                                , name = ""
+                                , bpm = String.fromInt source.startBpm
+                                , subdivision = source.subdivision
+                                , metronome = source.metronome
+                                , notes = ""
+                                }
+                    }
+
+                Nothing ->
+                    { reset | form = NoForm }
 
         EditPreset id ->
             let
@@ -520,37 +549,51 @@ updateModel msg model =
                                                         , metronome = True
                                                         , notes = ""
                                                         , archived = False
+                                                        , parentId = f.parentId
                                                         }
                                                    ]
                             in
-                            ( { model | store = { store | exercises = exercises } }, Nav.back model.key 1 )
+                            ( { model | store = { store | exercises = exercises } }
+                              -- A new variant was cloned from the generic's page: return past it.
+                            , Nav.back model.key
+                                (if f.id == Nothing && f.parentId /= Nothing then
+                                    2
+
+                                 else
+                                    1
+                                )
+                            )
 
                 _ ->
                     ( model, Cmd.none )
 
         DeleteExercise id ->
-            let
-                used =
-                    List.any (.segments >> List.any (\seg -> seg.exerciseId == id)) model.store.sessions
+            if List.any (\e -> e.parentId == Just id && not e.archived) model.store.exercises then
+                ( { model | notice = Just ( False, "Сначала удалите варианты этого упражнения." ) }, Cmd.none )
 
-                dropFromPresets =
-                    List.map (\p -> { p | items = List.filter (\i -> i.exerciseId /= id) p.items })
-            in
-            ( mapStore
-                (\s ->
-                    { s
-                        | exercises =
-                            if used then
-                                updateExercise id (\e -> { e | archived = True }) s.exercises
+            else
+                let
+                    used =
+                        List.any (.segments >> List.any (\seg -> seg.exerciseId == id)) model.store.sessions
 
-                            else
-                                List.filter (\e -> e.id /= id) s.exercises
-                        , presets = dropFromPresets s.presets
-                    }
+                    dropFromPresets =
+                        List.map (\p -> { p | items = List.filter (\i -> i.exerciseId /= id) p.items })
+                in
+                ( mapStore
+                    (\s ->
+                        { s
+                            | exercises =
+                                if used then
+                                    updateExercise id (\e -> { e | archived = True }) s.exercises
+
+                                else
+                                    List.filter (\e -> e.id /= id) s.exercises
+                            , presets = dropFromPresets s.presets
+                        }
+                    )
+                    model
+                , Nav.back model.key 1
                 )
-                model
-            , Nav.back model.key 1
-            )
 
         RestoreExercise id ->
             ( mapStore (\s -> { s | exercises = updateExercise id (\e -> { e | archived = False }) s.exercises }) model
@@ -964,9 +1007,18 @@ findPreset store id =
     List.filter (\p -> p.id == id) store.presets |> List.head
 
 
+{-| Non-archived exercises, each generic followed by its variants.
+-}
+libraryOrder : Store -> List Exercise
+libraryOrder store =
+    Domain.grouped store.exercises
+        |> List.concatMap (\( top, variants ) -> top :: variants)
+        |> List.filter (not << .archived)
+
+
 exerciseName : Store -> String -> String
 exerciseName store id =
-    findExercise store id |> Maybe.map .name |> Maybe.withDefault "(удалено)"
+    findExercise store id |> Maybe.map (Domain.displayName store.exercises) |> Maybe.withDefault "(удалено)"
 
 
 updateExercise : String -> (Exercise -> Exercise) -> List Exercise -> List Exercise
@@ -1238,6 +1290,9 @@ sameSection current target =
         ( EditExercise _, Library ) ->
             True
 
+        ( NewVariant _, Library ) ->
+            True
+
         ( EditPreset _, Library ) ->
             True
 
@@ -1280,6 +1335,14 @@ viewPage model =
             viewLibrary model
 
         EditExercise _ ->
+            case model.form of
+                ExForm f ->
+                    viewExerciseForm model f
+
+                _ ->
+                    []
+
+        NewVariant _ ->
             case model.form of
                 ExForm f ->
                     viewExerciseForm model f
@@ -1429,15 +1492,14 @@ viewSession model live =
         ]
     , if model.picker then
         div [ class "list" ]
-            (store.exercises
-                |> List.filter (not << .archived)
+            (libraryOrder store
                 |> List.map
                     (\ex ->
                         button
                             [ classList [ ( "row-btn", True ), ( "current", Maybe.map .exerciseId live.active == Just ex.id ) ]
                             , onClick (Act (SelectExercise ex.id))
                             ]
-                            [ span [] [ text ex.name ]
+                            [ span [] [ text (Domain.displayName store.exercises ex) ]
                             , span [ class "muted" ] [ text (exerciseTimeLabel model live ex.id) ]
                             ]
                     )
@@ -1497,7 +1559,7 @@ viewActive model live a =
                 ]
     in
     div [ class "card active-card" ]
-        [ div [ class "ex-name" ] [ text (ex |> Maybe.map .name |> Maybe.withDefault "(удалено)") ]
+        [ div [ class "ex-name" ] [ text (exerciseName model.store a.exerciseId) ]
         , case ex |> Maybe.map .notes |> Maybe.withDefault "" of
             "" ->
                 text ""
@@ -1730,8 +1792,8 @@ viewSummary model session =
 viewLibrary : Model -> List (Html Msg)
 viewLibrary model =
     let
-        ( active, archived ) =
-            List.partition (not << .archived) model.store.exercises
+        archived =
+            List.filter .archived model.store.exercises
     in
     [ h1 [] [ text "Библиотека" ]
     , h2 [] [ text "Пресеты" ]
@@ -1748,22 +1810,25 @@ viewLibrary model =
     , a [ class "btn secondary wide", href (routeHref (EditPreset Nothing)) ] [ text "+ Новый пресет" ]
     , h2 [] [ text "Упражнения" ]
     , div [ class "list" ]
-        (List.map
-            (\ex ->
-                a [ class "row-btn", href (routeHref (EditExercise (Just ex.id))) ]
-                    [ span [] [ text ex.name ]
-                    , span [ class "muted" ]
-                        [ text
-                            (if ex.metronome then
-                                String.fromInt ex.startBpm ++ " BPM " ++ subdivisionIcon ex.subdivision
-
-                             else
-                                "без клика"
-                            )
+        (libraryOrder model.store
+            |> List.map
+                (\ex ->
+                    a
+                        [ classList [ ( "row-btn", True ), ( "variant", ex.parentId /= Nothing ) ]
+                        , href (routeHref (EditExercise (Just ex.id)))
                         ]
-                    ]
-            )
-            active
+                        [ span [] [ text ex.name ]
+                        , span [ class "muted" ]
+                            [ text
+                                (if ex.metronome then
+                                    String.fromInt ex.startBpm ++ " BPM " ++ subdivisionIcon ex.subdivision
+
+                                 else
+                                    "без клика"
+                                )
+                            ]
+                        ]
+                )
         )
     , a [ class "btn secondary wide", href (routeHref (EditExercise Nothing)) ] [ text "+ Новое упражнение" ]
     , if List.isEmpty archived then
@@ -1776,7 +1841,7 @@ viewLibrary model =
                 (List.map
                     (\ex ->
                         div [ class "row-btn" ]
-                            [ span [] [ text ex.name ]
+                            [ span [] [ text (Domain.displayName model.store.exercises ex) ]
                             , button [ class "link", onClick (RestoreExercise ex.id) ] [ text "Вернуть" ]
                             ]
                     )
@@ -1798,15 +1863,32 @@ viewNotice model =
 
 viewExerciseForm : Model -> ExerciseForm -> List (Html Msg)
 viewExerciseForm model f =
+    let
+        parentName =
+            f.parentId |> Maybe.map (exerciseName model.store)
+    in
     [ h1 []
         [ text
-            (if f.id == Nothing then
-                "Новое упражнение"
+            (case ( f.id, parentName ) of
+                ( Nothing, Just _ ) ->
+                    "Новый вариант"
 
-             else
-                "Упражнение"
+                ( Nothing, Nothing ) ->
+                    "Новое упражнение"
+
+                ( Just _, Just _ ) ->
+                    "Вариант"
+
+                ( Just _, Nothing ) ->
+                    "Упражнение"
             )
         ]
+    , case parentName of
+        Just name ->
+            p [ class "muted" ] [ text ("Вариант упражнения «" ++ name ++ "»") ]
+
+        Nothing ->
+            text ""
     , label [ class "field" ]
         [ span [] [ text "Название" ]
         , input [ value f.name, onInput ExName, placeholder "Свип-арпеджио, ля минор" ] []
@@ -1841,6 +1923,12 @@ viewExerciseForm model f =
     , button [ class "btn big", onClick SaveExercise ] [ text "Сохранить" ]
     , case f.id of
         Just id ->
+            a [ class "btn secondary wide", href (routeHref (NewVariant id)) ] [ text "Клонировать в вариант" ]
+
+        Nothing ->
+            text ""
+    , case f.id of
+        Just id ->
             button [ class "link danger", onClick (DeleteExercise id) ] [ text "Удалить упражнение" ]
 
         Nothing ->
@@ -1852,7 +1940,7 @@ viewPresetForm : Model -> PresetForm -> List (Html Msg)
 viewPresetForm model f =
     let
         exercises =
-            List.filter (not << .archived) model.store.exercises
+            libraryOrder model.store
 
         used =
             List.map .exerciseId f.items
@@ -1862,7 +1950,7 @@ viewPresetForm model f =
         exerciseOptions selected =
             exercises
                 |> List.filter (\ex -> ex.id == selected || not (List.member ex.id used))
-                |> List.map (\ex -> option [ value ex.id, Html.Attributes.selected (ex.id == selected) ] [ text ex.name ])
+                |> List.map (\ex -> option [ value ex.id, Html.Attributes.selected (ex.id == selected) ] [ text (Domain.displayName model.store.exercises ex) ])
 
         available =
             List.filter (\ex -> not (List.member ex.id used)) exercises
@@ -1894,7 +1982,7 @@ viewPresetForm model f =
         , if model.picker && not (List.isEmpty available) then
             div [ class "list" ]
                 (List.map
-                    (\ex -> button [ class "row-btn", onClick (PrAddItem ex.id) ] [ span [] [ text ex.name ] ])
+                    (\ex -> button [ class "row-btn", onClick (PrAddItem ex.id) ] [ span [] [ text (Domain.displayName model.store.exercises ex) ] ])
                     available
                 )
 
@@ -2018,8 +2106,42 @@ viewStats model =
         all =
             Dict.values totals |> List.sum
 
-        ranked =
-            Dict.toList totals |> List.sortBy (Tuple.second >> negate)
+        -- Generic exercises with time rolled up from their variants.
+        groups =
+            Domain.grouped model.store.exercises
+                |> List.filterMap
+                    (\( top, variants ) ->
+                        case List.filter (\e -> Dict.member e.id totals) (top :: variants) of
+                            [] ->
+                                Nothing
+
+                            members ->
+                                Just ( top, members, List.filterMap (\e -> Dict.get e.id totals) members |> List.sum )
+                    )
+                |> List.sortBy (\( _, _, ms ) -> negate ms)
+
+        bpmHistory ex =
+            if ex.metronome then
+                viewBpmHistory (Domain.topBpmHistory ex.id sessions)
+
+            else
+                text ""
+
+        viewVariantStats ex =
+            [ div [ class "row spread variant-stat" ]
+                [ span []
+                    [ text
+                        (if ex.parentId == Nothing then
+                            "общее"
+
+                         else
+                            ex.name
+                        )
+                    ]
+                , span [ class "muted" ] [ text (Dict.get ex.id totals |> Maybe.withDefault 0 |> duration) ]
+                ]
+            , bpmHistory ex
+            ]
     in
     [ h1 [] [ text "Статистика" ]
     , div [ class "tiles" ]
@@ -2049,30 +2171,32 @@ viewStats model =
             days
         )
     , h2 [] [ text "Упражнения" ]
-    , if List.isEmpty ranked then
+    , if List.isEmpty groups then
         p [ class "muted" ] [ text "Пока пусто. Иди играть!" ]
 
       else
         div [ class "list" ]
             (List.map
-                (\( id, ms ) ->
-                    let
-                        history =
-                            Domain.topBpmHistory id sessions
-                    in
+                (\( top, members, ms ) ->
                     div [ class "card ex-stat" ]
-                        [ div [ class "row spread" ]
-                            [ div [ class "card-title" ] [ text (exerciseName model.store id) ]
+                        (div [ class "row spread" ]
+                            [ div [ class "card-title" ] [ text top.name ]
                             , div [] [ text (duration ms) ]
                             ]
-                        , if findExercise model.store id |> Maybe.map .metronome |> Maybe.withDefault True then
-                            viewBpmHistory history
+                            :: (case members of
+                                    [ only ] ->
+                                        if only.id == top.id then
+                                            [ bpmHistory top ]
 
-                          else
-                            text ""
-                        ]
+                                        else
+                                            viewVariantStats only
+
+                                    _ ->
+                                        List.concatMap viewVariantStats members
+                               )
+                        )
                 )
-                ranked
+                groups
             )
     , h2 [] [ text "История" ]
     , div [ class "list" ]
@@ -2207,12 +2331,12 @@ importExample : String
 importExample =
     """{
   "exercises": [
-    { "name": "Свипы Am", "bpm": 90, "subdivision": 3,
-      "metronome": true, "notes": "5 струн" }
+    { "name": "Am", "parent": "Свип-арпеджио", "bpm": 90,
+      "subdivision": 3, "notes": "5 струн" }
   ],
   "presets": [
     { "name": "Ежедневный", "items": [
-      { "exercise": "Свипы Am", "minutes": 10 }
+      { "exercise": "Свип-арпеджио · Am", "minutes": 10 }
     ] }
   ]
 }"""

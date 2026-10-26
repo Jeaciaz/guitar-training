@@ -609,3 +609,16 @@ details summary {
   cursor: grabbing;
   color: var(--accent);
 }
+
+.row-btn.variant {
+  margin-left: 20px;
+  width: calc(100% - 20px);
+  min-height: 46px;
+  background: transparent;
+}
+
+.variant-stat {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}

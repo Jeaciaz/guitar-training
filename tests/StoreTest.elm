@@ -16,10 +16,11 @@ sample =
 
         live =
             Domain.newLive 5 (Just "p1")
-                |> Domain.startExercise 5 { id = "free", name = "Свободная игра", startBpm = 100, subdivision = 1, metronome = False, notes = "", archived = False }
+                |> Domain.startExercise 5 { id = "free", name = "Свободная игра", startBpm = 100, subdivision = 1, metronome = False, notes = "", archived = False, parentId = Nothing }
     in
     { base
-        | presets = [ { id = "p1", name = "Daily", items = [ { exerciseId = "free", minutes = 5 } ] } ]
+        | exercises = List.filter (\e -> e.id == "free") base.exercises
+        , presets = [ { id = "p1", name = "Daily", items = [ { exerciseId = "free", minutes = 5 } ] } ]
         , sessions =
             [ { id = "s1"
               , startedAt = 1
@@ -73,6 +74,41 @@ suite =
                 Store.mergeImport 100 """{"presets":[{"name":"X","items":[{"exercise":"Свободная игра","minutes":3},{"exercise":"свободная игра","minutes":7}]}]}""" sample
                     |> Result.map (.presets >> List.filter (\p -> p.name == "X") >> List.map (.items >> List.map .minutes))
                     |> Expect.equal (Ok [ [ 3 ] ])
+        , test "merge import links variants and resolves them by display name" <|
+            \_ ->
+                let
+                    json =
+                        """{"exercises":[{"name":"Лик"},{"name":"Blues","parent":"лик","bpm":90},{"name":"Blues","bpm":70}],
+                            "presets":[{"name":"P","items":[{"exercise":"Лик · Blues","minutes":5}]}]}"""
+                in
+                Store.mergeImport 100 json sample
+                    |> Result.map
+                        (\s ->
+                            ( List.map (\e -> ( Domain.displayName s.exercises e, e.startBpm )) s.exercises
+                            , s.presets |> List.filter (\pr -> pr.name == "P") |> List.concatMap .items |> List.map .exerciseId
+                            )
+                        )
+                    |> Expect.equal
+                        (Ok
+                            ( [ ( "Свободная игра", 100 ), ( "Лик", 60 ), ( "Лик · Blues", 90 ), ( "Blues", 70 ) ]
+                            , [ "e101" ]
+                            )
+                        )
+        , test "merge import rejects an unknown parent" <|
+            \_ ->
+                Store.mergeImport 100 """{"exercises":[{"name":"Blues","parent":"Nope"}]}""" sample
+                    |> Expect.equal (Err "Неизвестное родительское упражнение: Nope")
+        , test "the standard library has no dangling preset items or parents" <|
+            \_ ->
+                let
+                    ids =
+                        List.map .id Store.empty.exercises
+                in
+                Expect.equal
+                    ( List.all (\i -> List.member i.exerciseId ids) (List.concatMap .items Store.empty.presets)
+                    , List.all (\e -> Maybe.map (\pid -> List.member pid ids) e.parentId |> Maybe.withDefault True) Store.empty.exercises
+                    )
+                    ( True, True )
         , test "merge import reports unknown exercises" <|
             \_ ->
                 Store.mergeImport 100 """{"presets":[{"name":"X","items":[{"exercise":"Nope","minutes":1}]}]}""" sample

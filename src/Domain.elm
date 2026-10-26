@@ -11,9 +11,11 @@ module Domain exposing
     , countInRemaining
     , dayKey
     , dedupeItems
+    , displayName
     , exerciseTimeInLive
     , exerciseTotals
     , finish
+    , grouped
     , idleLimitMs
     , isIdle
     , isRunning
@@ -50,6 +52,7 @@ type alias Exercise =
     , metronome : Bool
     , notes : String
     , archived : Bool
+    , parentId : Maybe String
     }
 
 
@@ -115,6 +118,37 @@ type alias LiveSession =
     , chimed : List String
     , heartbeat : Int
     }
+
+
+{-| "Лик · Blues" for a variant, the plain name otherwise.
+-}
+displayName : List Exercise -> Exercise -> String
+displayName exercises ex =
+    case ex.parentId |> Maybe.andThen (\pid -> List.filter (\p -> p.id == pid) exercises |> List.head) of
+        Just parent ->
+            parent.name ++ " · " ++ ex.name
+
+        Nothing ->
+            ex.name
+
+
+{-| Library order: each generic exercise with its variants. Variants whose
+parent is gone are listed as generics.
+-}
+grouped : List Exercise -> List ( Exercise, List Exercise )
+grouped exercises =
+    let
+        isTop e =
+            case e.parentId of
+                Just pid ->
+                    not (List.any (\p -> p.id == pid) exercises)
+
+                Nothing ->
+                    True
+    in
+    exercises
+        |> List.filter isTop
+        |> List.map (\top -> ( top, List.filter (\e -> e.parentId == Just top.id) exercises ))
 
 
 {-| A preset holds each exercise at most once; keep the first occurrence.

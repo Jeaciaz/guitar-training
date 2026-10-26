@@ -39,21 +39,85 @@ version =
 
 empty : Store
 empty =
-    { exercises =
-        [ { id = "free"
-          , name = "Свободная игра"
-          , startBpm = 100
-          , subdivision = 1
-          , metronome = False
-          , notes = "Импровизация, джем, просто поиграть. Тоже идёт в общее время."
-          , archived = False
+    { exercises = library
+    , presets =
+        [ { id = "technique"
+          , name = "Техника"
+          , items =
+                [ { exerciseId = "legato-workout", minutes = 3 }
+                , { exerciseId = "sequence-fours", minutes = 7 }
+                , { exerciseId = "sequence-slash", minutes = 10 }
+                , { exerciseId = "sweep-e", minutes = 10 }
+                ]
+          }
+        , { id = "music"
+          , name = "Музыка"
+          , items =
+                [ { exerciseId = "legato-workout", minutes = 3 }
+                , { exerciseId = "rhythm-blues", minutes = 10 }
+                , { exerciseId = "lick-blues", minutes = 7 }
+                , { exerciseId = "song-crying-fire", minutes = 15 }
+                ]
           }
         ]
-    , presets = []
     , sessions = []
     , live = Nothing
     , settings = { volume = 0.8 }
     }
+
+
+{-| The standard library a fresh install starts with: generic exercises
+plus variants (linked by `parentId`).
+-}
+library : List Exercise
+library =
+    let
+        generic id name =
+            { id = id
+            , name = name
+            , startBpm = 60
+            , subdivision = 1
+            , metronome = True
+            , notes = ""
+            , archived = False
+            , parentId = Nothing
+            }
+
+        variant parentId id name bpm =
+            { id = id
+            , name = name
+            , startBpm = bpm
+            , subdivision = 1
+            , metronome = True
+            , notes = ""
+            , archived = False
+            , parentId = Just parentId
+            }
+    in
+    [ generic "song" "Песня"
+    , variant "song" "song-crying-fire" "Avatar — Crying Fire" 88
+    , generic "rhythm" "Ритм"
+    , variant "rhythm" "rhythm-blues" "Blues" 90
+    , generic "lick" "Лик"
+    , variant "lick" "lick-blues" "Blues" 90
+    , generic "sequence" "Секвенция"
+    , variant "sequence" "sequence-slash" "Slash's sequence" 100
+    , variant "sequence" "sequence-fours" "Fours" 90
+    , generic "riff" "Рифф"
+    , generic "sweep" "Свип-арпеджио"
+    , variant "sweep" "sweep-e" "E" 90
+    , generic "legato" "Легато"
+    , variant "legato" "legato-workout" "Workout" 80
+    , { id = "free"
+      , name = "Свободная игра"
+      , startBpm = 100
+      , subdivision = 1
+      , metronome = False
+      , notes = "Импровизация, джем, просто поиграть. Тоже идёт в общее время."
+      , archived = False
+      , parentId = Nothing
+      }
+    ]
 
 
 
@@ -82,6 +146,7 @@ encodeExercise e =
         , ( "metronome", E.bool e.metronome )
         , ( "notes", E.string e.notes )
         , ( "archived", E.bool e.archived )
+        , ( "parentId", maybe E.string e.parentId )
         ]
 
 
@@ -170,14 +235,16 @@ decoder =
 
 exerciseDecoder : Decoder Exercise
 exerciseDecoder =
-    D.map7 Exercise
-        (D.field "id" D.string)
-        (D.field "name" D.string)
-        (D.field "startBpm" D.int)
-        (D.field "subdivision" D.int)
-        (D.field "metronome" D.bool)
-        (D.field "notes" D.string)
-        (D.field "archived" D.bool)
+    D.succeed Exercise
+        |> andField "id" D.string
+        |> andField "name" D.string
+        |> andField "startBpm" D.int
+        |> andField "subdivision" D.int
+        |> andField "metronome" D.bool
+        |> andField "notes" D.string
+        |> andField "archived" D.bool
+        -- Absent in data saved before variants existed.
+        |> D.map2 (|>) (D.oneOf [ D.field "parentId" (D.nullable D.string), D.succeed Nothing ])
 
 
 presetDecoder : Decoder Preset
@@ -253,6 +320,7 @@ andField name d =
 
 type alias ImportExercise =
     { name : String
+    , parent : Maybe String
     , bpm : Maybe Int
     , subdivision : Maybe Int
     , metronome : Maybe Bool
@@ -276,8 +344,9 @@ importDecoder =
     D.map2 Tuple.pair
         (optional "exercises"
             (D.list
-                (D.map5 ImportExercise
+                (D.map6 ImportExercise
                     (D.field "name" D.string)
+                    (optional "parent" D.string)
                     (optional "bpm" D.int)
                     (optional "subdivision" D.int)
                     (optional "metronome" D.bool)
@@ -309,6 +378,24 @@ sameName a b =
     String.toLower (String.trim a) == String.toLower (String.trim b)
 
 
+{-| Find an exercise by its display name ("Лик · Blues"), or by its plain
+name when that is unambiguous.
+-}
+findByName : List Exercise -> String -> Maybe Exercise
+findByName exercises name =
+    case List.filter (\e -> sameName (Domain.displayName exercises e) name) exercises of
+        e :: _ ->
+            Just e
+
+        [] ->
+            case List.filter (\e -> sameName e.name name) exercises of
+                [ e ] ->
+                    Just e
+
+                _ ->
+                    Nothing
+
+
 {-| Apply pasted JSON. A full backup (has `version`) replaces everything;
 anything else is merged: exercises and presets are upserted by name and
 history is never touched. `idSeed` keeps generated ids unique.
@@ -326,39 +413,38 @@ mergeImport idSeed json store =
                     Err ("Не удалось прочитать JSON: " ++ D.errorToString err)
 
                 Ok ( exs, presets ) ->
-                    let
-                        exercises =
-                            List.foldl upsertExercise ( idSeed, store.exercises ) exs |> Tuple.second
+                    List.foldl (\ie acc -> Result.andThen (upsertExercise ie) acc) (Ok ( idSeed, store.exercises )) exs
+                        |> Result.andThen
+                            (\( _, exercises ) ->
+                                let
+                                    resolve ( name, minutes ) =
+                                        findByName exercises name
+                                            |> Maybe.map (\e -> PresetItem e.id minutes)
+                                            |> Result.fromMaybe name
 
-                        resolve ( name, minutes ) =
-                            exercises
-                                |> List.filter (\e -> sameName e.name name)
-                                |> List.head
-                                |> Maybe.map (\e -> PresetItem e.id minutes)
-                                |> Result.fromMaybe name
+                                    resolved =
+                                        List.map (\ip -> ( ip.name, List.map resolve ip.items )) presets
 
-                        resolved =
-                            List.map (\ip -> ( ip.name, List.map resolve ip.items )) presets
+                                    missing =
+                                        List.concatMap (Tuple.second >> List.filterMap errorOf) resolved
+                                in
+                                if List.isEmpty missing then
+                                    Ok
+                                        { store
+                                            | exercises = exercises
+                                            , presets =
+                                                List.foldl
+                                                    (\( name, items ) ( n, ps ) ->
+                                                        ( n + 1, upsertPreset n name (Domain.dedupeItems (List.filterMap Result.toMaybe items)) ps )
+                                                    )
+                                                    ( idSeed, store.presets )
+                                                    resolved
+                                                    |> Tuple.second
+                                        }
 
-                        missing =
-                            List.concatMap (Tuple.second >> List.filterMap errorOf) resolved
-                    in
-                    if List.isEmpty missing then
-                        Ok
-                            { store
-                                | exercises = exercises
-                                , presets =
-                                    List.foldl
-                                        (\( name, items ) ( n, ps ) ->
-                                            ( n + 1, upsertPreset n name (Domain.dedupeItems (List.filterMap Result.toMaybe items)) ps )
-                                        )
-                                        ( idSeed, store.presets )
-                                        resolved
-                                        |> Tuple.second
-                            }
-
-                    else
-                        Err ("Неизвестные упражнения в пресетах: " ++ String.join ", " missing)
+                                else
+                                    Err ("Неизвестные упражнения в пресетах: " ++ String.join ", " missing)
+                            )
 
 
 errorOf : Result e a -> Maybe e
@@ -371,52 +457,73 @@ errorOf r =
             Nothing
 
 
-upsertExercise : ImportExercise -> ( Int, List Exercise ) -> ( Int, List Exercise )
+upsertExercise : ImportExercise -> ( Int, List Exercise ) -> Result String ( Int, List Exercise )
 upsertExercise ie ( n, exercises ) =
-    if List.any (\e -> sameName e.name ie.name) exercises then
-        ( n
-        , List.map
-            (\e ->
-                if sameName e.name ie.name then
-                    { e
-                        | startBpm = Maybe.withDefault e.startBpm ie.bpm |> Domain.clampBpm
-                        , subdivision = Maybe.withDefault e.subdivision ie.subdivision |> clamp 1 4
-                        , metronome = Maybe.withDefault e.metronome ie.metronome
-                        , notes = Maybe.withDefault e.notes ie.notes
-                        , archived = False
-                    }
+    let
+        parent =
+            case ie.parent of
+                Just name ->
+                    exercises
+                        |> List.filter (\e -> e.parentId == Nothing && sameName e.name name)
+                        |> List.head
+                        |> Maybe.map (Just << .id)
+                        |> Result.fromMaybe ("Неизвестное родительское упражнение: " ++ name)
+
+                Nothing ->
+                    Ok Nothing
+
+        isSame parentId e =
+            e.parentId == parentId && sameName e.name ie.name
+    in
+    parent
+        |> Result.map
+            (\parentId ->
+                if List.any (isSame parentId) exercises then
+                    ( n
+                    , List.map
+                        (\e ->
+                            if isSame parentId e then
+                                { e
+                                    | startBpm = Maybe.withDefault e.startBpm ie.bpm |> Domain.clampBpm
+                                    , subdivision = Maybe.withDefault e.subdivision ie.subdivision |> clamp 1 4
+                                    , metronome = Maybe.withDefault e.metronome ie.metronome
+                                    , notes = Maybe.withDefault e.notes ie.notes
+                                    , archived = False
+                                }
+
+                            else
+                                e
+                        )
+                        exercises
+                    )
 
                 else
-                    e
+                    ( n + 1
+                    , exercises
+                        ++ [ { id = "e" ++ String.fromInt n
+                             , name = String.trim ie.name
+                             , startBpm = Maybe.withDefault 60 ie.bpm |> Domain.clampBpm
+                             , subdivision = Maybe.withDefault 1 ie.subdivision |> clamp 1 4
+                             , metronome = Maybe.withDefault True ie.metronome
+                             , notes = Maybe.withDefault "" ie.notes
+                             , archived = False
+                             , parentId = parentId
+                             }
+                           ]
+                    )
             )
-            exercises
-        )
-
-    else
-        ( n + 1
-        , exercises
-            ++ [ { id = "e" ++ String.fromInt n
-                 , name = String.trim ie.name
-                 , startBpm = Maybe.withDefault 80 ie.bpm |> Domain.clampBpm
-                 , subdivision = Maybe.withDefault 1 ie.subdivision |> clamp 1 4
-                 , metronome = Maybe.withDefault True ie.metronome
-                 , notes = Maybe.withDefault "" ie.notes
-                 , archived = False
-                 }
-               ]
-        )
 
 
 upsertPreset : Int -> String -> List PresetItem -> List Preset -> List Preset
 upsertPreset n name items presets =
-    if List.any (\p -> sameName p.name name) presets then
+    if List.any (\pr -> sameName pr.name name) presets then
         List.map
-            (\p ->
-                if sameName p.name name then
-                    { p | items = items }
+            (\pr ->
+                if sameName pr.name name then
+                    { pr | items = items }
 
                 else
-                    p
+                    pr
             )
             presets
 

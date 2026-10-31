@@ -445,7 +445,34 @@ input[type="range"] {
 .preset-item {
   display: flex;
   gap: 6px;
+  align-items: flex-start;
+}
+
+.preset-item.multi {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 6px 6px 0 0;
+}
+
+.slot-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.choice-row {
+  display: flex;
+  gap: 6px;
   align-items: center;
+}
+
+.add-choice {
+  align-self: flex-start;
+  color: var(--accent);
+  font-size: 13px;
+  padding: 0 0 6px;
 }
 
 .preset-item select {
@@ -621,4 +648,27 @@ details summary {
   margin-top: 12px;
   padding-top: 10px;
   border-top: 1px solid var(--border);
+}
+
+.queue-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.queue-row .row-btn {
+  flex: 1;
+  min-width: 0;
+}
+
+.icon-btn.reroll {
+  width: 52px;
+  height: auto;
+  font-size: 22px;
+}
+
+.random-mark {
+  margin-left: 6px;
+  font-size: 13px;
+  opacity: 0.6;
 }

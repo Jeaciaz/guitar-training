@@ -3,6 +3,7 @@ module DomainTest exposing (suite)
 import Dict
 import Domain exposing (Exercise)
 import Expect
+import Random
 import Test exposing (Test, describe, test)
 import Time
 
@@ -20,6 +21,56 @@ sweeps =
 free : Exercise
 free =
     ex "free" 100 False
+
+
+variant : String -> String -> Exercise
+variant parent id =
+    { id = id, name = id, startBpm = 60, subdivision = 1, metronome = True, notes = "", archived = False, parentId = Just parent }
+
+
+{-| seq has three variants, riff none, lick one (plus an archived one).
+-}
+groups : List Exercise
+groups =
+    [ ex "seq" 60 True
+    , variant "seq" "a"
+    , variant "seq" "b"
+    , variant "seq" "c"
+    , ex "riff" 60 True
+    , ex "lick" 60 True
+    , variant "lick" "blues"
+    , { id = "old", name = "old", startBpm = 60, subdivision = 1, metronome = True, notes = "", archived = True, parentId = Just "lick" }
+    ]
+
+
+choice : String -> Int -> Bool -> Domain.Choice
+choice id minutes random =
+    { exerciseId = id, minutes = minutes, random = random }
+
+
+{-| A one-choice slot.
+-}
+item : String -> Int -> Bool -> Domain.PresetItem
+item id minutes random =
+    { choices = [ choice id minutes random ] }
+
+
+fresh : Domain.History
+fresh =
+    { now = 0, lastPlayed = Dict.empty }
+
+
+{-| Plans for many seeds, as (exerciseId, minutes) rows.
+-}
+plansWith : Domain.History -> List Domain.PresetItem -> List (List ( String, Int ))
+plansWith history items =
+    List.range 0 199
+        |> List.map (\n -> Domain.buildPlan history (Random.initialSeed n) groups items |> List.map (\p -> ( p.exerciseId, p.minutes )))
+
+
+plans : List Domain.PresetItem -> List (List ( String, Int ))
+plans =
+    plansWith fresh
 
 
 {-| Run steps on the active exercise of a live session.
@@ -151,6 +202,106 @@ suite =
                 in
                 Domain.lastTopBpm "sweeps" [ session "free" 3 90, session "sweeps" 2 132, session "sweeps" 1 120 ]
                     |> Expect.equal (Just 132)
+        , test "random items pick distinct live variants, never a fixed one" <|
+            \_ ->
+                plans [ item "a" 3 False, item "seq" 10 True, item "seq" 7 True, item "lick" 5 True ]
+                    |> List.all
+                        (\plan ->
+                            case plan of
+                                [ ( "a", 3 ), ( x, 10 ), ( y, 7 ), ( "blues", 5 ) ] ->
+                                    x /= y && List.member x [ "b", "c" ] && List.member y [ "b", "c" ]
+
+                                _ ->
+                                    False
+                        )
+                    |> Expect.equal True
+        , test "random picks vary between seeds" <|
+            \_ ->
+                plans [ item "seq" 10 True ]
+                    |> List.filterMap (List.head >> Maybe.map Tuple.first)
+                    |> List.sort
+                    |> List.foldr
+                        (\x acc ->
+                            if List.head acc == Just x then
+                                acc
+
+                            else
+                                x :: acc
+                        )
+                        []
+                    |> Expect.equal [ "a", "b", "c" ]
+        , test "a slot plays one of its choices, for that choice's minutes" <|
+            \_ ->
+                let
+                    results =
+                        plans [ { choices = [ choice "seq" 8 True, choice "riff" 5 True ] } ]
+                            |> List.concat
+                in
+                ( List.all (\( id, m ) -> (List.member id [ "a", "b", "c" ] && m == 8) || (id == "riff" && m == 5)) results
+                , List.any (\( id, _ ) -> id == "riff") results && List.any (\( id, _ ) -> id /= "riff") results
+                )
+                    |> Expect.equal ( True, True )
+        , test "stale exercises come up more often" <|
+            \_ ->
+                let
+                    now =
+                        30 * 86400000
+
+                    -- a played today (weight 1), b and c never (15 each)
+                    history =
+                        { now = now, lastPlayed = Dict.fromList [ ( "a", now ) ] }
+                in
+                plansWith history [ item "seq" 10 True ]
+                    |> List.filter (List.head >> Maybe.map Tuple.first >> (==) (Just "a"))
+                    |> List.length
+                    |> Expect.lessThan 20
+        , test "a group without variants plays the generic; an exhausted group merges minutes" <|
+            \_ ->
+                Domain.buildPlan fresh (Random.initialSeed 1) groups [ item "riff" 5 True, item "lick" 5 True, item "lick" 3 True, item "gone" 4 True ]
+                    |> List.map (\p -> ( p.exerciseId, p.minutes ))
+                    |> Expect.equal [ ( "riff", 5 ), ( "blues", 8 ) ]
+        , test "reroll swaps to another free pick and its minutes, or keeps the pick" <|
+            \_ ->
+                let
+                    row id minutes choices =
+                        { exerciseId = id, minutes = minutes, choices = choices }
+
+                    plan =
+                        [ row "a" 5 [ choice "seq" 5 True ]
+                        , row "riff" 4 [ choice "riff" 4 True, choice "b" 9 False ]
+                        , row "blues" 5 [ choice "lick" 5 True ]
+                        ]
+
+                    reroll idx =
+                        Domain.reroll fresh (Random.initialSeed 7) groups idx plan |> List.map (\p -> ( p.exerciseId, p.minutes ))
+                in
+                ( reroll 1, reroll 2 )
+                    |> Expect.equal
+                        ( [ ( "a", 5 ), ( "b", 9 ), ( "blues", 5 ) ]
+                        , [ ( "a", 5 ), ( "riff", 4 ), ( "blues", 5 ) ]
+                        )
+        , test "reroll of a random choice avoids picks already in the plan" <|
+            \_ ->
+                Domain.reroll fresh
+                    (Random.initialSeed 3)
+                    groups
+                    0
+                    [ { exerciseId = "a", minutes = 5, choices = [ choice "seq" 5 True ] }
+                    , { exerciseId = "b", minutes = 5, choices = [ choice "seq" 5 True ] }
+                    ]
+                    |> List.map .exerciseId
+                    |> Expect.equal [ "c", "b" ]
+        , test "dedupe tidies slots and keeps a fixed exercise once" <|
+            \_ ->
+                Domain.dedupeItems
+                    [ item "a" 1 False
+                    , { choices = [ choice "seq" 2 True, choice "seq" 2 True, choice "a" 3 False ] }
+                    , item "a" 3 False
+                    , { choices = [] }
+                    , item "seq" 4 True
+                    ]
+                    |> List.map (.choices >> List.map .minutes)
+                    |> Expect.equal [ [ 1 ], [ 2, 3 ], [ 4 ] ]
         , test "minutesByDay buckets by local day" <|
             \_ ->
                 let

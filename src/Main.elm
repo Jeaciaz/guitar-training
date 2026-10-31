@@ -4,7 +4,7 @@ import Browser
 import Browser.Events
 import Browser.Navigation as Nav
 import Dict
-import Domain exposing (Active, Exercise, LiveSession, Preset, Session)
+import Domain exposing (Active, Choice, Exercise, LiveSession, PlanItem, Preset, PresetItem, Session)
 import File exposing (File)
 import File.Download
 import File.Select
@@ -13,6 +13,7 @@ import Html.Attributes exposing (attribute, checked, class, classList, disabled,
 import Html.Events exposing (on, onCheck, onClick, onInput, preventDefaultOn)
 import Json.Decode as D
 import Json.Encode as E
+import Random
 import Store exposing (Store)
 import Svg
 import Svg.Attributes as SA
@@ -67,7 +68,19 @@ type alias ExerciseForm =
 type alias PresetForm =
     { id : Maybe String
     , name : String
-    , items : List { exerciseId : String, minutes : String }
+    , items : List FormSlot
+    }
+
+
+type alias FormSlot =
+    { choices : List FormChoice
+    }
+
+
+type alias FormChoice =
+    { exerciseId : String
+    , minutes : String
+    , random : Bool
     }
 
 
@@ -93,14 +106,15 @@ type alias Model =
     }
 
 
-{-| A preset item being dragged by its handle. `pitch` is the row height plus
-the list gap, so the drop index follows from how far the pointer moved.
+{-| A preset slot being dragged by its handle. `heights` are all slots'
+heights at drag start (they differ), so the drop index follows from how far
+the pointer moved.
 -}
 type alias Drag =
     { from : Int
     , startY : Float
     , y : Float
-    , pitch : Float
+    , heights : List Float
     }
 
 
@@ -126,9 +140,17 @@ init flags url key =
             else
                 e
 
+        -- Sessions saved before plans existed get one from their preset.
+        withPlan live =
+            if List.isEmpty live.plan then
+                { live | plan = planFor flags.now (Random.initialSeed live.startedAt) loaded live.presetId }
+
+            else
+                live
+
         restored =
             { loaded
-                | live = Maybe.map Domain.restore loaded.live
+                | live = Maybe.map (Domain.restore >> withPlan) loaded.live
                 , exercises = List.map renameFreePlay loaded.exercises
             }
 
@@ -315,7 +337,12 @@ enterRoute model =
                             existing
                                 |> Maybe.map .items
                                 |> Maybe.withDefault []
-                                |> List.map (\i -> { exerciseId = i.exerciseId, minutes = String.fromInt i.minutes })
+                                |> List.map
+                                    (\i ->
+                                        { choices =
+                                            List.map (\c -> { exerciseId = c.exerciseId, minutes = String.fromInt c.minutes, random = c.random }) i.choices
+                                        }
+                                    )
                         }
             }
 
@@ -338,6 +365,7 @@ type Action
     | StartQuick
     | SelectExercise String
     | NextExercise
+    | Reroll Int
     | TogglePlay
     | BumpBpm Int
     | SetSubdivision Int
@@ -367,12 +395,13 @@ type Msg
     | DeleteExercise String
     | RestoreExercise String
     | PrName String
-    | PrItemExercise Int String
-    | PrItemMinutes Int String
-    | DragStart Int Float Float
+    | PrChoiceExercise Int Int String
+    | PrChoiceMinutes Int Int String
+    | PrChoiceRemove Int Int
+    | PrAddChoice Int
+    | DragStart Int Float (List Float)
     | DragMove Float
     | DragEnd
-    | PrItemRemove Int
     | PrAddItem String
     | SavePreset
     | DeletePreset String
@@ -577,7 +606,15 @@ updateModel msg model =
                         List.any (.segments >> List.any (\seg -> seg.exerciseId == id)) model.store.sessions
 
                     dropFromPresets =
-                        List.map (\p -> { p | items = List.filter (\i -> i.exerciseId /= id) p.items })
+                        List.map
+                            (\p ->
+                                { p
+                                    | items =
+                                        p.items
+                                            |> List.map (\i -> { i | choices = List.filter (\c -> c.exerciseId /= id) i.choices })
+                                            |> List.filter (not << List.isEmpty << .choices)
+                                }
+                            )
                 in
                 ( mapStore
                     (\s ->
@@ -603,22 +640,52 @@ updateModel msg model =
         PrName v ->
             ( mapPrForm (\f -> { f | name = v }) model, Cmd.none )
 
-        PrItemExercise i v ->
-            ( mapPrForm (\f -> { f | items = updateAt i (\it -> { it | exerciseId = v }) f.items }) model, Cmd.none )
+        PrChoiceExercise i j v ->
+            let
+                ( exId, random ) =
+                    parseItemKey v
+            in
+            ( mapChoice i j (\c -> { c | exerciseId = exId, random = random }) model, Cmd.none )
 
-        PrItemMinutes i v ->
-            ( mapPrForm (\f -> { f | items = updateAt i (\it -> { it | minutes = v }) f.items }) model, Cmd.none )
+        PrChoiceMinutes i j v ->
+            ( mapChoice i j (\c -> { c | minutes = v }) model, Cmd.none )
 
-        DragStart i y pitch ->
-            ( { model | drag = Just { from = i, startY = y, y = y, pitch = pitch } }, Cmd.none )
+        PrChoiceRemove i j ->
+            ( mapPrForm
+                (\f ->
+                    { f
+                        | items =
+                            f.items
+                                |> updateAt i (\sl -> { sl | choices = List.take j sl.choices ++ List.drop (j + 1) sl.choices })
+                                |> List.filter (not << List.isEmpty << .choices)
+                    }
+                )
+                model
+            , Cmd.none
+            )
+
+        PrAddChoice i ->
+            let
+                -- Start with a group the slot doesn't offer yet; the select changes it.
+                fresh sl =
+                    libraryOrder model.store
+                        |> List.filter (\ex -> ex.parentId == Nothing && not (List.any (\c -> c.random && c.exerciseId == ex.id) sl.choices))
+                        |> List.head
+                        |> Maybe.map (\ex -> [ { exerciseId = ex.id, minutes = "5", random = True } ])
+                        |> Maybe.withDefault []
+            in
+            ( mapPrForm (\f -> { f | items = updateAt i (\sl -> { sl | choices = sl.choices ++ fresh sl }) f.items }) model, Cmd.none )
+
+        DragStart i y heights ->
+            ( { model | drag = Just { from = i, startY = y, y = y, heights = heights } }, Cmd.none )
 
         DragMove y ->
             ( { model | drag = Maybe.map (\d -> { d | y = y }) model.drag }, Cmd.none )
 
         DragEnd ->
             case ( model.drag, model.form ) of
-                ( Just d, PrForm f ) ->
-                    ( mapPrForm (\form -> { form | items = move d.from (dropIndex (List.length f.items) d) form.items })
+                ( Just d, PrForm _ ) ->
+                    ( mapPrForm (\form -> { form | items = move d.from (dropIndex d) form.items })
                         { model | drag = Nothing }
                     , Cmd.none
                     )
@@ -626,11 +693,12 @@ updateModel msg model =
                 _ ->
                     ( { model | drag = Nothing }, Cmd.none )
 
-        PrItemRemove i ->
-            ( mapPrForm (\f -> { f | items = List.take i f.items ++ List.drop (i + 1) f.items }) model, Cmd.none )
-
-        PrAddItem exId ->
-            ( mapPrForm (\f -> { f | items = f.items ++ [ { exerciseId = exId, minutes = "5" } ] }) { model | picker = False }
+        PrAddItem key ->
+            let
+                ( exId, random ) =
+                    parseItemKey key
+            in
+            ( mapPrForm (\f -> { f | items = f.items ++ [ { choices = [ { exerciseId = exId, minutes = "5", random = random } ] } ] }) { model | picker = False }
             , Cmd.none
             )
 
@@ -641,9 +709,16 @@ updateModel msg model =
                         items =
                             f.items
                                 |> List.map
-                                    (\it ->
-                                        { exerciseId = it.exerciseId
-                                        , minutes = String.toInt it.minutes |> Maybe.withDefault 5 |> clamp 1 600
+                                    (\sl ->
+                                        { choices =
+                                            List.map
+                                                (\c ->
+                                                    { exerciseId = c.exerciseId
+                                                    , minutes = String.toInt c.minutes |> Maybe.withDefault 5 |> clamp 1 600
+                                                    , random = c.random
+                                                    }
+                                                )
+                                                sl.choices
                                         }
                                     )
                                 |> Domain.dedupeItems
@@ -744,13 +819,14 @@ act action now model =
 
         StartPreset presetId ->
             let
-                first =
-                    findPreset model.store presetId
-                        |> Maybe.andThen (.items >> List.head)
-                        |> Maybe.andThen (.exerciseId >> findExercise model.store)
+                fresh =
+                    Domain.newLive now (Just presetId)
 
                 live =
-                    Domain.newLive now (Just presetId)
+                    { fresh | plan = planFor now (Random.initialSeed now) model.store (Just presetId) }
+
+                first =
+                    List.head live.plan |> Maybe.andThen (.exerciseId >> findExercise model.store)
             in
             ( mapStore
                 (\s ->
@@ -784,9 +860,46 @@ act action now model =
                     ( model, Cmd.none )
 
         NextExercise ->
-            case model.store.live |> Maybe.andThen (nextInPreset now model.store) of
+            case model.store.live |> Maybe.andThen (nextInPreset now) of
                 Just exId ->
                     act (SelectExercise exId) now model
+
+                Nothing ->
+                    ( model, Cmd.none )
+
+        Reroll idx ->
+            case model.store.live of
+                Just live ->
+                    case List.drop idx live.plan |> List.head of
+                        Just item ->
+                            if canReroll now model.store live idx item then
+                                let
+                                    plan =
+                                        Domain.reroll (playHistory now model.store) (Random.initialSeed now) model.store.exercises idx live.plan
+
+                                    picked =
+                                        List.drop idx plan |> List.head |> Maybe.andThen (.exerciseId >> findExercise model.store)
+
+                                    -- A pick still on screen (paused, untouched) is swapped too.
+                                    swap l =
+                                        case ( l.active, picked ) of
+                                            ( Just a, Just ex ) ->
+                                                if a.exerciseId == item.exerciseId then
+                                                    Domain.startExercise now ex l
+
+                                                else
+                                                    l
+
+                                            _ ->
+                                                l
+                                in
+                                ( mapLive (\l -> swap { l | plan = plan }) model, Cmd.none )
+
+                            else
+                                ( model, Cmd.none )
+
+                        Nothing ->
+                            ( model, Cmd.none )
 
                 Nothing ->
                     ( model, Cmd.none )
@@ -839,7 +952,7 @@ tick now model =
 
                     -- The active exercise, if it just reached its preset target.
                     due =
-                        case ( touched.active, presetTarget model.store touched ) of
+                        case ( touched.active, presetTarget touched ) of
                             ( Just a, Just minutes ) ->
                                 if
                                     not (List.member a.exerciseId touched.chimed)
@@ -875,19 +988,18 @@ finishLive now model =
             ( mapStore (\s -> { s | live = Nothing }) { model | confirmFinish = False }, go model Home )
 
 
-{-| Target minutes for the active exercise in the session's preset.
+{-| Target minutes for the active exercise in the session's plan.
 -}
-presetTarget : Store -> LiveSession -> Maybe Int
-presetTarget store live =
-    Maybe.map2
-        (\preset a ->
-            preset.items
-                |> List.filter (\i -> i.exerciseId == a.exerciseId)
-                |> List.map .minutes
-                |> List.sum
-        )
-        (live.presetId |> Maybe.andThen (findPreset store))
-        live.active
+presetTarget : LiveSession -> Maybe Int
+presetTarget live =
+    live.active
+        |> Maybe.map
+            (\a ->
+                live.plan
+                    |> List.filter (\i -> i.exerciseId == a.exerciseId)
+                    |> List.map .minutes
+                    |> List.sum
+            )
         |> Maybe.andThen
             (\m ->
                 if m > 0 then
@@ -898,41 +1010,115 @@ presetTarget store live =
             )
 
 
-{-| The next unfinished preset item after the current one (wrapping), or
+{-| The next unfinished plan item after the current one (wrapping), or
 simply the next item when everything is done.
 -}
-nextInPreset : Int -> Store -> LiveSession -> Maybe String
-nextInPreset now store live =
-    live.presetId
+nextInPreset : Int -> LiveSession -> Maybe String
+nextInPreset now live =
+    let
+        current =
+            live.active |> Maybe.map .exerciseId
+
+        idx =
+            live.plan
+                |> List.indexedMap Tuple.pair
+                |> List.filter (\( _, item ) -> Just item.exerciseId == current)
+                |> List.head
+                |> Maybe.map Tuple.first
+                |> Maybe.withDefault -1
+
+        rotated =
+            List.drop (idx + 1) live.plan ++ List.take (idx + 1) live.plan
+
+        candidates =
+            List.filter (\i -> Just i.exerciseId /= current) rotated
+
+        unfinished =
+            List.filter (\i -> Domain.exerciseTimeInLive now i.exerciseId live < i.minutes * 60000) candidates
+    in
+    List.head (unfinished ++ candidates) |> Maybe.map .exerciseId
+
+
+{-| Resolve a preset's slots for a new session.
+-}
+planFor : Int -> Random.Seed -> Store -> Maybe String -> List PlanItem
+planFor now seed store presetId =
+    presetId
         |> Maybe.andThen (findPreset store)
-        |> Maybe.andThen
-            (\preset ->
-                let
-                    ids =
-                        List.map .exerciseId preset.items
+        |> Maybe.map (.items >> Domain.buildPlan (playHistory now store) seed store.exercises)
+        |> Maybe.withDefault []
 
-                    current =
-                        live.active |> Maybe.map .exerciseId
 
-                    idx =
-                        ids
-                            |> List.indexedMap Tuple.pair
-                            |> List.filter (\( _, id ) -> Just id == current)
-                            |> List.head
-                            |> Maybe.map Tuple.first
-                            |> Maybe.withDefault -1
+playHistory : Int -> Store -> Domain.History
+playHistory now store =
+    { now = now, lastPlayed = Domain.lastPlayed store.sessions }
 
-                    rotated =
-                        List.drop (idx + 1) preset.items ++ List.take (idx + 1) preset.items
 
-                    candidates =
-                        List.filter (\i -> Just i.exerciseId /= current) rotated
+{-| A random pick can be swapped until it has been played.
+-}
+canReroll : Int -> Store -> LiveSession -> Int -> PlanItem -> Bool
+canReroll now store live idx item =
+    (Domain.exerciseTimeInLive now item.exerciseId live == 0)
+        && (live.active |> Maybe.map (\a -> a.exerciseId /= item.exerciseId || a.runningSince == Nothing) |> Maybe.withDefault True)
+        && not (List.isEmpty (Domain.rerollOptions store.exercises idx live.plan))
 
-                    unfinished =
-                        List.filter (\i -> Domain.exerciseTimeInLive now i.exerciseId live < i.minutes * 60000) candidates
-                in
-                List.head (unfinished ++ candidates) |> Maybe.map .exerciseId
-            )
+
+{-| Preset form option values: "random:<generic id>" for a random choice.
+-}
+itemKey : { a | exerciseId : String, random : Bool } -> String
+itemKey item =
+    if item.random then
+        "random:" ++ item.exerciseId
+
+    else
+        item.exerciseId
+
+
+parseItemKey : String -> ( String, Bool )
+parseItemKey key =
+    if String.startsWith "random:" key then
+        ( String.dropLeft 7 key, True )
+
+    else
+        ( key, False )
+
+
+choiceLabel : Store -> { a | exerciseId : String, random : Bool } -> String
+choiceLabel store c =
+    if c.random then
+        "🎲 " ++ exerciseName store c.exerciseId
+
+    else
+        exerciseName store c.exerciseId
+
+
+slotLabel : Store -> PresetItem -> String
+slotLabel store item =
+    String.join " / " (List.map (choiceLabel store) item.choices)
+
+
+{-| A preset's length: one choice of each slot is played, so it's a range
+when choices differ in length.
+-}
+minutesRange : List (List Int) -> String
+minutesRange slots =
+    let
+        lo =
+            slots |> List.filterMap List.minimum |> List.sum
+
+        hi =
+            slots |> List.filterMap List.maximum |> List.sum
+    in
+    if lo == hi then
+        String.fromInt lo ++ " мин"
+
+    else
+        String.fromInt lo ++ "–" ++ String.fromInt hi ++ " мин"
+
+
+presetMinutes : Preset -> String
+presetMinutes preset =
+    minutesRange (List.map (.choices >> List.map .minutes) preset.items)
 
 
 
@@ -962,6 +1148,11 @@ mapExForm f model =
 
         _ ->
             model
+
+
+mapChoice : Int -> Int -> (FormChoice -> FormChoice) -> Model -> Model
+mapChoice i j f =
+    mapPrForm (\form -> { form | items = updateAt i (\sl -> { sl | choices = updateAt j f sl.choices }) form.items })
 
 
 mapPrForm : (PresetForm -> PresetForm) -> Model -> Model
@@ -1045,9 +1236,32 @@ updateAt i f =
         )
 
 
-dropIndex : Int -> Drag -> Int
-dropIndex count d =
-    clamp 0 (count - 1) (d.from + round ((d.y - d.startY) / d.pitch))
+{-| Where the dragged slot lands: it passes a neighbour once it has moved
+over half of that neighbour (plus the list gap).
+-}
+dropIndex : Drag -> Int
+dropIndex d =
+    let
+        dy =
+            d.y - d.startY
+
+        steps remaining hs n =
+            case hs of
+                h :: rest ->
+                    if remaining > (h + 8) / 2 then
+                        steps (remaining - h - 8) rest (n + 1)
+
+                    else
+                        n
+
+                [] ->
+                    n
+    in
+    if dy >= 0 then
+        d.from + steps dy (List.drop (d.from + 1) d.heights) 0
+
+    else
+        d.from - steps -dy (List.reverse (List.take d.from d.heights)) 0
 
 
 move : Int -> Int -> List a -> List a
@@ -1418,9 +1632,9 @@ viewHome model =
                                     [ div [ class "card-title" ] [ text preset.name ]
                                     , div [ class "muted" ]
                                         [ text
-                                            (String.fromInt (List.sum (List.map .minutes preset.items))
-                                                ++ " мин · "
-                                                ++ String.join ", " (List.map (.exerciseId >> exerciseName store) preset.items)
+                                            (presetMinutes preset
+                                                ++ " · "
+                                                ++ String.join ", " (List.map (slotLabel store) preset.items)
                                             )
                                         ]
                                     ]
@@ -1475,12 +1689,11 @@ viewSession model live =
 
         Nothing ->
             p [ class "muted" ] [ text "Выберите упражнение." ]
-    , case preset of
-        Just pr ->
-            viewQueue model live pr
+    , if List.isEmpty live.plan then
+        text ""
 
-        Nothing ->
-            text ""
+      else
+        viewQueue model live
     , button [ class "btn secondary wide", onClick TogglePicker ]
         [ text
             (if model.picker then
@@ -1533,7 +1746,7 @@ viewActive model live a =
             Domain.exerciseTimeInLive model.now a.exerciseId live
 
         target =
-            presetTarget model.store live
+            presetTarget live
 
         running =
             a.runningSince /= Nothing
@@ -1653,14 +1866,14 @@ viewActive model live a =
         ]
 
 
-viewQueue : Model -> LiveSession -> Preset -> Html Msg
-viewQueue model live preset =
+viewQueue : Model -> LiveSession -> Html Msg
+viewQueue model live =
     let
         current =
             live.active |> Maybe.map .exerciseId
 
         currentDone =
-            case ( live.active, presetTarget model.store live ) of
+            case ( live.active, presetTarget live ) of
                 ( Just a, Just m ) ->
                     Domain.exerciseTimeInLive model.now a.exerciseId live >= m * 60000
 
@@ -1669,34 +1882,51 @@ viewQueue model live preset =
     in
     div [ class "queue" ]
         [ div [ class "list" ]
-            (List.map
-                (\item ->
+            (List.indexedMap
+                (\idx item ->
                     let
                         spent =
                             Domain.exerciseTimeInLive model.now item.exerciseId live
 
                         done =
                             spent >= item.minutes * 60000
+
+                        rerollable =
+                            canReroll model.now model.store live idx item
                     in
-                    button
-                        [ classList [ ( "row-btn", True ), ( "current", current == Just item.exerciseId ), ( "done", done ) ]
-                        , onClick (Act (SelectExercise item.exerciseId))
-                        ]
-                        [ span []
-                            [ text
-                                ((if done then
-                                    "✓ "
+                    div [ class "queue-row" ]
+                        [ button
+                            [ classList [ ( "row-btn", True ), ( "current", current == Just item.exerciseId ), ( "done", done ) ]
+                            , onClick (Act (SelectExercise item.exerciseId))
+                            ]
+                            [ span []
+                                [ text
+                                    ((if done then
+                                        "✓ "
+
+                                      else
+                                        ""
+                                     )
+                                        ++ exerciseName model.store item.exerciseId
+                                    )
+
+                                -- Without a reroll button, still show the pick was random.
+                                , if (List.length item.choices > 1 || List.any .random item.choices) && not rerollable then
+                                    span [ class "random-mark", title "Случайный вариант" ] [ text "🎲" ]
 
                                   else
-                                    ""
-                                 )
-                                    ++ exerciseName model.store item.exerciseId
-                                )
+                                    text ""
+                                ]
+                            , span [ class "muted" ] [ text (clock spent ++ " / " ++ String.fromInt item.minutes ++ " мин") ]
                             ]
-                        , span [ class "muted" ] [ text (clock spent ++ " / " ++ String.fromInt item.minutes ++ " мин") ]
+                        , if rerollable then
+                            button [ class "icon-btn reroll", title "Другой вариант", onClick (Act (Reroll idx)) ] [ text "🎲" ]
+
+                          else
+                            text ""
                         ]
                 )
-                preset.items
+                live.plan
             )
         , button
             [ classList [ ( "btn big next", True ), ( "glow", currentDone ) ]
@@ -1802,7 +2032,7 @@ viewLibrary model =
             (\pr ->
                 a [ class "row-btn", href (routeHref (EditPreset (Just pr.id))) ]
                     [ span [] [ text pr.name ]
-                    , span [ class "muted" ] [ text (String.fromInt (List.sum (List.map .minutes pr.items)) ++ " мин") ]
+                    , span [ class "muted" ] [ text (presetMinutes pr) ]
                     ]
             )
             model.store.presets
@@ -1942,21 +2172,58 @@ viewPresetForm model f =
         exercises =
             libraryOrder model.store
 
-        used =
-            List.map .exerciseId f.items
+        -- Exercises fixed by a slot elsewhere can't be offered again.
+        fixedIn slots =
+            List.filterMap Domain.fixedExercise slots
 
-        -- Each exercise can be in a preset once: a row offers its own
-        -- exercise plus those not used by other rows.
-        exerciseOptions selected =
+        randomChoices =
             exercises
-                |> List.filter (\ex -> ex.id == selected || not (List.member ex.id used))
-                |> List.map (\ex -> option [ value ex.id, Html.Attributes.selected (ex.id == selected) ] [ text (Domain.displayName model.store.exercises ex) ])
+                |> List.filter (\ex -> ex.parentId == Nothing)
+                |> List.map (\ex -> ( "random:" ++ ex.id, "🎲 " ++ ex.name ))
 
-        available =
-            List.filter (\ex -> not (List.member ex.id used)) exercises
+        fixedChoices taken =
+            exercises
+                |> List.filter (\ex -> not (List.member ex.id taken))
+                |> List.map (\ex -> ( ex.id, Domain.displayName model.store.exercises ex ))
+
+        -- A choice offers what neither its slot's other choices nor fixed
+        -- slots elsewhere use; plus its own value, even if archived meanwhile.
+        exerciseOptions i j choice =
+            let
+                key =
+                    itemKey choice
+
+                slot =
+                    List.drop i f.items |> List.head |> Maybe.map .choices |> Maybe.withDefault []
+
+                siblings =
+                    List.take j slot ++ List.drop (j + 1) slot |> List.map itemKey
+
+                others =
+                    fixedIn (List.take i f.items ++ List.drop (i + 1) f.items)
+
+                offered =
+                    (fixedChoices others ++ randomChoices)
+                        |> List.filter (\( k, _ ) -> not (List.member k siblings))
+
+                own =
+                    if List.any (\( k, _ ) -> k == key) offered then
+                        []
+
+                    else
+                        [ ( key, choiceLabel model.store choice ) ]
+            in
+            (own ++ offered)
+                |> List.map (\( k, label ) -> option [ value k, Html.Attributes.selected (k == key) ] [ text label ])
+
+        addable =
+            fixedChoices (fixedIn f.items)
+
+        pickRow ( key, label ) =
+            button [ class "row-btn", onClick (PrAddItem key) ] [ span [] [ text label ] ]
 
         total =
-            f.items |> List.filterMap (.minutes >> String.toInt) |> List.sum
+            minutesRange (List.map (.choices >> List.filterMap (.minutes >> String.toInt)) f.items)
     in
     [ h1 []
         [ text
@@ -1972,18 +2239,19 @@ viewPresetForm model f =
         , input [ value f.name, onInput PrName, placeholder "Ежедневный" ] []
         ]
     , div [ class "field" ]
-        [ span [] [ text ("Упражнения · " ++ String.fromInt total ++ " мин") ]
+        [ span [] [ text ("Упражнения · " ++ total) ]
         , div [ class "list" ] (List.indexedMap (viewPresetItem model.drag (List.length f.items) exerciseOptions) f.items)
-        , if List.isEmpty available then
-            text ""
-
-          else
-            button [ class "btn secondary wide", onClick TogglePicker ] [ text "+ Добавить упражнение" ]
-        , if model.picker && not (List.isEmpty available) then
+        , button [ class "btn secondary wide", onClick TogglePicker ] [ text "+ Добавить упражнение" ]
+        , if model.picker then
             div [ class "list" ]
-                (List.map
-                    (\ex -> button [ class "row-btn", onClick (PrAddItem ex.id) ] [ span [] [ text (Domain.displayName model.store.exercises ex) ] ])
-                    available
+                (span [ class "muted small" ] [ text "Случайный вариант из группы" ]
+                    :: List.map pickRow randomChoices
+                    ++ (if List.isEmpty addable then
+                            []
+
+                        else
+                            span [ class "muted small" ] [ text "Конкретное упражнение" ] :: List.map pickRow addable
+                       )
                 )
 
           else
@@ -2000,8 +2268,8 @@ viewPresetForm model f =
     ]
 
 
-viewPresetItem : Maybe Drag -> Int -> (String -> List (Html Msg)) -> Int -> { exerciseId : String, minutes : String } -> Html Msg
-viewPresetItem drag count exerciseOptions i item =
+viewPresetItem : Maybe Drag -> Int -> (Int -> Int -> FormChoice -> List (Html Msg)) -> Int -> FormSlot -> Html Msg
+viewPresetItem drag count exerciseOptions i slot =
     let
         px v =
             "translateY(" ++ String.fromFloat v ++ "px)"
@@ -2011,16 +2279,19 @@ viewPresetItem drag count exerciseOptions i item =
                 Just d ->
                     let
                         target =
-                            dropIndex count d
+                            dropIndex d
+
+                        pitch =
+                            (List.drop d.from d.heights |> List.head |> Maybe.withDefault 0) + 8
                     in
                     if i == d.from then
                         ( True, px (d.y - d.startY) )
 
                     else if d.from < i && i <= target then
-                        ( False, px -d.pitch )
+                        ( False, px -pitch )
 
                     else if target <= i && i < d.from then
-                        ( False, px d.pitch )
+                        ( False, px pitch )
 
                     else
                         ( False, "none" )
@@ -2028,12 +2299,39 @@ viewPresetItem drag count exerciseOptions i item =
                 Nothing ->
                     ( False, "none" )
 
+        -- The handle's grandparent is the list: measure every slot.
         startDrag =
-            D.map2 (\y height -> ( DragStart i y (height + 8), True ))
+            D.map2 (\y heights -> ( DragStart i y heights, True ))
                 (D.field "clientY" D.float)
-                (D.at [ "currentTarget", "parentElement", "offsetHeight" ] D.float)
+                (List.range 0 (count - 1)
+                    |> List.map (\n -> D.at [ "currentTarget", "parentElement", "parentElement", "children", String.fromInt n, "offsetHeight" ] D.float)
+                    |> List.foldr (D.map2 (::)) (D.succeed [])
+                )
+
+        viewChoice j choice =
+            div [ class "choice-row" ]
+                [ select [ onInput (PrChoiceExercise i j) ] (exerciseOptions i j choice)
+                , input
+                    [ type_ "number"
+                    , attribute "inputmode" "numeric"
+                    , class "minutes"
+                    , value choice.minutes
+                    , onInput (PrChoiceMinutes i j)
+                    ]
+                    []
+                , span [ class "muted" ] [ text "мин" ]
+                , button [ class "icon-btn danger", onClick (PrChoiceRemove i j) ] [ text "✕" ]
+                ]
     in
-    div [ classList [ ( "preset-item", True ), ( "dragging", dragging ), ( "settling", drag /= Nothing && not dragging ) ], style "transform" shift ]
+    div
+        [ classList
+            [ ( "preset-item", True )
+            , ( "multi", List.length slot.choices > 1 )
+            , ( "dragging", dragging )
+            , ( "settling", drag /= Nothing && not dragging )
+            ]
+        , style "transform" shift
+        ]
         [ span
             [ class "drag-handle"
             , preventDefaultOn "pointerdown" startDrag
@@ -2045,17 +2343,10 @@ viewPresetItem drag count exerciseOptions i item =
             , on "pointercancel" (D.succeed DragEnd)
             ]
             [ text "⠿" ]
-        , select [ onInput (PrItemExercise i) ] (exerciseOptions item.exerciseId)
-        , input
-            [ type_ "number"
-            , attribute "inputmode" "numeric"
-            , class "minutes"
-            , value item.minutes
-            , onInput (PrItemMinutes i)
-            ]
-            []
-        , span [ class "muted" ] [ text "мин" ]
-        , button [ class "icon-btn danger", onClick (PrItemRemove i) ] [ text "✕" ]
+        , div [ class "slot-body" ]
+            (List.indexedMap viewChoice slot.choices
+                ++ [ button [ class "add-choice", onClick (PrAddChoice i) ] [ text "+ или…" ] ]
+            )
         ]
 
 
@@ -2336,7 +2627,12 @@ importExample =
   ],
   "presets": [
     { "name": "Ежедневный", "items": [
-      { "exercise": "Свип-арпеджио · Am", "minutes": 10 }
+      { "exercise": "Легато · Workout", "minutes": 3 },
+      { "exercise": "Свип-арпеджио · Am", "minutes": 10 },
+      { "choices": [
+        { "exercise": "Секвенция", "random": true, "minutes": 8 },
+        { "exercise": "Лик · Blues", "minutes": 5 }
+      ] }
     ] }
   ]
 }"""

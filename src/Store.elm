@@ -11,7 +11,7 @@ module Store exposing
 "paste JSON" merge import (see README for the import format).
 -}
 
-import Domain exposing (Active, Exercise, LiveSession, Preset, PresetItem, Segment, Session)
+import Domain exposing (Active, Choice, Exercise, LiveSession, PlanItem, Preset, PresetItem, Segment, Session)
 import Json.Decode as D exposing (Decoder)
 import Json.Encode as E
 
@@ -41,22 +41,22 @@ empty : Store
 empty =
     { exercises = library
     , presets =
-        [ { id = "technique"
-          , name = "Техника"
+        [ { id = "daily"
+          , name = "Ежедневная"
           , items =
-                [ { exerciseId = "legato-workout", minutes = 3 }
-                , { exerciseId = "sequence-fours", minutes = 7 }
-                , { exerciseId = "sequence-slash", minutes = 10 }
-                , { exerciseId = "sweep-e", minutes = 10 }
+                [ slot [ fixed "legato-workout" 3 ]
+                , slot [ random "sweep" 10 ]
+                , slot [ random "sequence" 8, random "lick" 7, random "riff" 5 ]
+                , slot [ random "song" 12, random "rhythm" 5 ]
                 ]
           }
-        , { id = "music"
-          , name = "Музыка"
+        , { id = "short"
+          , name = "Короткая"
           , items =
-                [ { exerciseId = "legato-workout", minutes = 3 }
-                , { exerciseId = "rhythm-blues", minutes = 10 }
-                , { exerciseId = "lick-blues", minutes = 7 }
-                , { exerciseId = "song-crying-fire", minutes = 15 }
+                [ slot [ fixed "legato-workout" 3 ]
+                , slot [ random "sweep" 5 ]
+                , slot [ random "sequence" 5, random "lick" 5, random "riff" 4 ]
+                , slot [ random "song" 7, random "rhythm" 4 ]
                 ]
           }
         ]
@@ -64,6 +64,21 @@ empty =
     , live = Nothing
     , settings = { volume = 0.8 }
     }
+
+
+slot : List Choice -> PresetItem
+slot choices =
+    { choices = choices }
+
+
+fixed : String -> Int -> Choice
+fixed id minutes =
+    { exerciseId = id, minutes = minutes, random = False }
+
+
+random : String -> Int -> Choice
+random id minutes =
+    { exerciseId = id, minutes = minutes, random = True }
 
 
 {-| The standard library a fresh install starts with: generic exercises
@@ -102,7 +117,8 @@ library =
     , variant "lick" "lick-blues" "Blues" 90
     , generic "sequence" "Секвенция"
     , variant "sequence" "sequence-slash" "Slash's sequence" 100
-    , variant "sequence" "sequence-fours" "Fours" 90
+    , variant "sequence" "sequence-fours-am" "Fours over A minor" 90
+    , variant "sequence" "sequence-fours-ahm" "Fours over A harmonic minor" 90
     , generic "riff" "Рифф"
     , generic "sweep" "Свип-арпеджио"
     , variant "sweep" "sweep-e" "E" 90
@@ -156,10 +172,17 @@ encodePreset p =
         [ ( "id", E.string p.id )
         , ( "name", E.string p.name )
         , ( "items"
-          , E.list
-                (\i -> E.object [ ( "exerciseId", E.string i.exerciseId ), ( "minutes", E.int i.minutes ) ])
-                p.items
+          , E.list (\i -> E.object [ ( "choices", E.list encodeChoice i.choices ) ]) p.items
           )
+        ]
+
+
+encodeChoice : Choice -> E.Value
+encodeChoice c =
+    E.object
+        [ ( "exerciseId", E.string c.exerciseId )
+        , ( "minutes", E.int c.minutes )
+        , ( "random", E.bool c.random )
         ]
 
 
@@ -211,6 +234,16 @@ encodeLive l =
         , ( "active", maybe encodeActive l.active )
         , ( "chimed", E.list E.string l.chimed )
         , ( "heartbeat", E.int l.heartbeat )
+        , ( "plan", E.list encodePlanItem l.plan )
+        ]
+
+
+encodePlanItem : PlanItem -> E.Value
+encodePlanItem i =
+    E.object
+        [ ( "exerciseId", E.string i.exerciseId )
+        , ( "minutes", E.int i.minutes )
+        , ( "choices", E.list encodeChoice i.choices )
         ]
 
 
@@ -254,12 +287,23 @@ presetDecoder =
         (D.field "name" D.string)
         (D.field "items"
             (D.list
-                (D.map2 PresetItem
-                    (D.field "exerciseId" D.string)
-                    (D.field "minutes" D.int)
+                (D.oneOf
+                    [ D.map PresetItem (D.field "choices" (D.list choiceDecoder))
+
+                    -- Data saved before slots: one exercise per item.
+                    , D.map (\c -> PresetItem [ c ]) choiceDecoder
+                    ]
                 )
             )
         )
+
+
+choiceDecoder : Decoder Choice
+choiceDecoder =
+    D.map3 Choice
+        (D.field "exerciseId" D.string)
+        (D.field "minutes" D.int)
+        (D.oneOf [ D.field "random" D.bool, D.succeed False ])
 
 
 segmentDecoder : Decoder Segment
@@ -299,14 +343,25 @@ activeDecoder =
 
 liveDecoder : Decoder LiveSession
 liveDecoder =
-    D.map7 LiveSession
-        (D.field "id" D.string)
-        (D.field "startedAt" D.int)
-        (D.field "presetId" (D.nullable D.string))
-        (D.field "segments" (D.list segmentDecoder))
-        (D.field "active" (D.nullable activeDecoder))
-        (D.field "chimed" (D.list D.string))
-        (D.field "heartbeat" D.int)
+    D.succeed LiveSession
+        |> andField "id" D.string
+        |> andField "startedAt" D.int
+        |> andField "presetId" (D.nullable D.string)
+        |> andField "segments" (D.list segmentDecoder)
+        |> andField "active" (D.nullable activeDecoder)
+        |> andField "chimed" (D.list D.string)
+        |> andField "heartbeat" D.int
+        -- Absent in sessions saved before plans existed.
+        |> D.map2 (|>) (D.oneOf [ D.field "plan" (D.list planItemDecoder), D.succeed [] ])
+
+
+planItemDecoder : Decoder PlanItem
+planItemDecoder =
+    D.map3 PlanItem
+        (D.field "exerciseId" D.string)
+        (D.field "minutes" D.int)
+        -- Absent in plans saved by a pre-release build.
+        (D.oneOf [ D.field "choices" (D.list choiceDecoder), D.succeed [] ])
 
 
 andField : String -> Decoder a -> Decoder (a -> b) -> Decoder b
@@ -328,9 +383,18 @@ type alias ImportExercise =
     }
 
 
+{-| Each item is a slot of one or more choices.
+-}
 type alias ImportPreset =
     { name : String
-    , items : List ( String, Int )
+    , items : List (List ImportChoice)
+    }
+
+
+type alias ImportChoice =
+    { exercise : String
+    , minutes : Int
+    , random : Bool
     }
 
 
@@ -361,9 +425,10 @@ importDecoder =
                     (D.field "name" D.string)
                     (D.field "items"
                         (D.list
-                            (D.map2 Tuple.pair
-                                (D.field "exercise" D.string)
-                                (D.field "minutes" D.int)
+                            (D.oneOf
+                                [ D.field "choices" (D.list importChoiceDecoder)
+                                , D.map List.singleton importChoiceDecoder
+                                ]
                             )
                         )
                     )
@@ -371,6 +436,14 @@ importDecoder =
             )
             |> D.map (Maybe.withDefault [])
         )
+
+
+importChoiceDecoder : Decoder ImportChoice
+importChoiceDecoder =
+    D.map3 ImportChoice
+        (D.field "exercise" D.string)
+        (D.field "minutes" D.int)
+        (optional "random" D.bool |> D.map (Maybe.withDefault False))
 
 
 sameName : String -> String -> Bool
@@ -417,16 +490,23 @@ mergeImport idSeed json store =
                         |> Result.andThen
                             (\( _, exercises ) ->
                                 let
-                                    resolve ( name, minutes ) =
-                                        findByName exercises name
-                                            |> Maybe.map (\e -> PresetItem e.id minutes)
-                                            |> Result.fromMaybe name
+                                    -- A random choice names the generic it picks from.
+                                    resolve item =
+                                        (if item.random then
+                                            List.filter (\e -> e.parentId == Nothing && sameName e.name item.exercise) exercises
+                                                |> List.head
+
+                                         else
+                                            findByName exercises item.exercise
+                                        )
+                                            |> Maybe.map (\e -> Choice e.id item.minutes item.random)
+                                            |> Result.fromMaybe item.exercise
 
                                     resolved =
-                                        List.map (\ip -> ( ip.name, List.map resolve ip.items )) presets
+                                        List.map (\ip -> ( ip.name, List.map (List.map resolve) ip.items )) presets
 
                                     missing =
-                                        List.concatMap (Tuple.second >> List.filterMap errorOf) resolved
+                                        List.concatMap (Tuple.second >> List.concat >> List.filterMap errorOf) resolved
                                 in
                                 if List.isEmpty missing then
                                     Ok
@@ -435,7 +515,7 @@ mergeImport idSeed json store =
                                             , presets =
                                                 List.foldl
                                                     (\( name, items ) ( n, ps ) ->
-                                                        ( n + 1, upsertPreset n name (Domain.dedupeItems (List.filterMap Result.toMaybe items)) ps )
+                                                        ( n + 1, upsertPreset n name (Domain.dedupeItems (List.map (List.filterMap Result.toMaybe >> PresetItem) items)) ps )
                                                     )
                                                     ( idSeed, store.presets )
                                                     resolved

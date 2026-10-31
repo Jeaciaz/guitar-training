@@ -1,12 +1,16 @@
 module Domain exposing
     ( Active
+    , Choice
     , Exercise
+    , History
     , LiveSession
+    , PlanItem
     , Preset
     , PresetItem
     , Segment
     , Session
     , activeElapsed
+    , buildPlan
     , clampBpm
     , countInRemaining
     , dayKey
@@ -15,15 +19,19 @@ module Domain exposing
     , exerciseTimeInLive
     , exerciseTotals
     , finish
+    , fixedExercise
     , grouped
     , idleLimitMs
     , isIdle
     , isRunning
+    , lastPlayed
     , lastTopBpm
     , liveTotal
     , minutesByDay
     , newLive
     , pause
+    , reroll
+    , rerollOptions
     , restore
     , resume
     , sessionTotal
@@ -37,6 +45,7 @@ module Domain exposing
     )
 
 import Dict exposing (Dict)
+import Random
 import Time
 
 
@@ -56,9 +65,39 @@ type alias Exercise =
     }
 
 
-type alias PresetItem =
+{-| One option of a preset slot. A random choice's `exerciseId` is a
+generic exercise standing for any of its variants.
+-}
+type alias Choice =
     { exerciseId : String
     , minutes : Int
+    , random : Bool
+    }
+
+
+{-| A preset slot: each session plays one of its choices (see `buildPlan`).
+A fixed exercise is a slot with a single non-random choice.
+-}
+type alias PresetItem =
+    { choices : List Choice
+    }
+
+
+{-| A preset slot resolved for one session. The slot's choices are kept so
+the pick can be rerolled even if the preset is edited meanwhile.
+-}
+type alias PlanItem =
+    { exerciseId : String
+    , minutes : Int
+    , choices : List Choice
+    }
+
+
+{-| When each exercise was last played, for favouring stale picks.
+-}
+type alias History =
+    { now : Int
+    , lastPlayed : Dict String Int
     }
 
 
@@ -117,6 +156,7 @@ type alias LiveSession =
     , active : Maybe Active
     , chimed : List String
     , heartbeat : Int
+    , plan : List PlanItem
     }
 
 
@@ -151,20 +191,241 @@ grouped exercises =
         |> List.map (\top -> ( top, List.filter (\e -> e.parentId == Just top.id) exercises ))
 
 
-{-| A preset holds each exercise at most once; keep the first occurrence.
+{-| Tidy a preset: no repeated choice within a slot, no empty slots, and a
+fixed exercise at most once (later repeats are dropped).
 -}
 dedupeItems : List PresetItem -> List PresetItem
 dedupeItems items =
+    let
+        uniqueChoices =
+            List.foldl
+                (\c acc ->
+                    if List.any (\x -> x.exerciseId == c.exerciseId && x.random == c.random) acc then
+                        acc
+
+                    else
+                        acc ++ [ c ]
+                )
+                []
+    in
+    items
+        |> List.map (\i -> { i | choices = uniqueChoices i.choices })
+        |> List.filter (not << List.isEmpty << .choices)
+        |> List.foldl
+            (\item acc ->
+                case fixedExercise item of
+                    Just id ->
+                        if List.any (\i -> fixedExercise i == Just id) acc then
+                            acc
+
+                        else
+                            acc ++ [ item ]
+
+                    Nothing ->
+                        acc ++ [ item ]
+            )
+            []
+
+
+{-| The exercise of a fixed (single, non-random choice) slot.
+-}
+fixedExercise : { a | choices : List { b | exerciseId : String, random : Bool } } -> Maybe String
+fixedExercise item =
+    case item.choices of
+        [ c ] ->
+            if c.random then
+                Nothing
+
+            else
+                Just c.exerciseId
+
+        _ ->
+            Nothing
+
+
+{-| What a random choice can pick: the generic's variants, or the generic
+itself when it has none.
+-}
+groupMembers : List Exercise -> String -> List String
+groupMembers exercises groupId =
+    case List.filter (\e -> e.parentId == Just groupId && not e.archived) exercises of
+        [] ->
+            List.filter (\e -> e.id == groupId && not e.archived) exercises |> List.map .id
+
+        variants ->
+            List.map .id variants
+
+
+outcomes : List Exercise -> Choice -> List String
+outcomes exercises c =
+    if c.random then
+        groupMembers exercises c.exerciseId
+
+    else
+        [ c.exerciseId ]
+
+
+{-| Every exercise a slot can end up as.
+-}
+slotOutcomes : List Exercise -> List Choice -> List String
+slotOutcomes exercises choices =
     List.foldl
-        (\item acc ->
-            if List.any (\i -> i.exerciseId == item.exerciseId) acc then
+        (\id acc ->
+            if List.member id acc then
                 acc
 
             else
-                acc ++ [ item ]
+                acc ++ [ id ]
         )
         []
-        items
+        (List.concatMap (outcomes exercises) choices)
+
+
+lastPlayed : List Session -> Dict String Int
+lastPlayed sessions =
+    List.foldl
+        (\seg -> Dict.update seg.exerciseId (Maybe.withDefault 0 >> max seg.startedAt >> Just))
+        Dict.empty
+        (List.concatMap .segments sessions)
+
+
+{-| 1 for played just now, growing a point a day up to 15 (also for never
+played). A group counts as played when any of its exercises was.
+-}
+staleness : History -> List String -> Float
+staleness history ids =
+    case List.filterMap (\id -> Dict.get id history.lastPlayed) ids |> List.maximum of
+        Just at ->
+            1 + clamp 0 14 (toFloat (history.now - at) / 86400000)
+
+        Nothing ->
+            15
+
+
+weightedPick : Random.Seed -> List ( Float, a ) -> Maybe ( a, Random.Seed )
+weightedPick seed options =
+    case options of
+        [] ->
+            Nothing
+
+        x :: xs ->
+            Just (Random.step (Random.weighted x xs) seed)
+
+
+{-| Pick a choice, then (for a random choice) one of its exercises, both
+favouring stale ones. Exercises in `taken` are avoided.
+-}
+pickSlot : History -> List Exercise -> List String -> Random.Seed -> List Choice -> Maybe ( ( String, Int ), Random.Seed )
+pickSlot history exercises taken seed choices =
+    choices
+        |> List.filterMap
+            (\c ->
+                case List.filter (\id -> not (List.member id taken)) (outcomes exercises c) of
+                    [] ->
+                        Nothing
+
+                    ids ->
+                        Just ( staleness history (outcomes exercises c), ( c, ids ) )
+            )
+        |> weightedPick seed
+        |> Maybe.andThen
+            (\( ( c, ids ), next ) ->
+                weightedPick next (List.map (\id -> ( staleness history [ id ], id )) ids)
+                    |> Maybe.map (\( id, last ) -> ( ( id, c.minutes ), last ))
+            )
+
+
+{-| Resolve a preset for one session, avoiding exercises already in the plan
+and those fixed elsewhere in the preset. When a slot has nothing left the
+pick repeats and its minutes join the existing row.
+-}
+buildPlan : History -> Random.Seed -> List Exercise -> List PresetItem -> List PlanItem
+buildPlan history seed0 exercises items =
+    let
+        fixed =
+            List.filterMap fixedExercise items
+
+        add item plan =
+            if List.any (\p -> p.exerciseId == item.exerciseId) plan then
+                List.map
+                    (\p ->
+                        if p.exerciseId == item.exerciseId then
+                            { p | minutes = p.minutes + item.minutes }
+
+                        else
+                            p
+                    )
+                    plan
+
+            else
+                plan ++ [ item ]
+
+        step item ( seed, plan ) =
+            let
+                taken =
+                    List.map .exerciseId plan
+                        ++ (if fixedExercise item == Nothing then
+                                fixed
+
+                            else
+                                []
+                           )
+
+                picked =
+                    case pickSlot history exercises taken seed item.choices of
+                        Nothing ->
+                            pickSlot history exercises [] seed item.choices
+
+                        found ->
+                            found
+            in
+            case picked of
+                Just ( ( id, minutes ), next ) ->
+                    ( next, add { exerciseId = id, minutes = minutes, choices = item.choices } plan )
+
+                Nothing ->
+                    ( seed, plan )
+    in
+    List.foldl step ( seed0, [] ) items |> Tuple.second
+
+
+{-| Other picks for plan row `idx`: its slot's exercises not in the plan yet.
+-}
+rerollOptions : List Exercise -> Int -> List PlanItem -> List String
+rerollOptions exercises idx plan =
+    case List.drop idx plan |> List.head of
+        Just item ->
+            let
+                taken =
+                    List.map .exerciseId plan
+            in
+            slotOutcomes exercises item.choices |> List.filter (\id -> not (List.member id taken))
+
+        Nothing ->
+            []
+
+
+reroll : History -> Random.Seed -> List Exercise -> Int -> List PlanItem -> List PlanItem
+reroll history seed exercises idx plan =
+    case List.drop idx plan |> List.head of
+        Just item ->
+            case pickSlot history exercises (List.map .exerciseId plan) seed item.choices of
+                Just ( ( id, minutes ), _ ) ->
+                    List.indexedMap
+                        (\i p ->
+                            if i == idx then
+                                { p | exerciseId = id, minutes = minutes }
+
+                            else
+                                p
+                        )
+                        plan
+
+                Nothing ->
+                    plan
+
+        Nothing ->
+            plan
 
 
 
@@ -185,6 +446,7 @@ newLive now presetId =
     , active = Nothing
     , chimed = []
     , heartbeat = now
+    , plan = []
     }
 
 

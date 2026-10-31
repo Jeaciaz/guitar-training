@@ -13,6 +13,13 @@ Live: https://jeaciaz.github.io/guitar-training/ (on Android Chrome: menu → "I
   the click is on. Only unpaused time counts.
 - **Presets**: when an exercise reaches its target time you get a chime and
   vibration and "Next" glows; you advance when you're ready.
+- **Slots**: a preset item is a slot of one or more choices, each with its
+  own minutes ("+ или…" in the editor); a session plays one of them. A choice
+  can be a whole group (🎲 Секвенция = any of its variants, or the generic
+  itself if it has none). Picks favour what you haven't played for longer
+  (weight 1 if played today, +1 per day, up to 15), avoid exercises already in
+  the session, and until a pick has been played 🎲 next to it in the session
+  queue rerolls it.
 - **BPM**: an exercise's start BPM only changes when you edit it. During a
   session the top BPM you actually *played* (held for 10 s, so mis-taps don't
   count) is recorded; the end-of-session summary offers a one-tap "make N the
@@ -35,7 +42,14 @@ and never touches history. Ask Claude to produce JSON in this shape and paste it
     { "name": "Am", "parent": "Свип-арпеджио", "bpm": 90, "subdivision": 3, "notes": "5-string shape" }
   ],
   "presets": [
-    { "name": "Daily", "items": [ { "exercise": "Свип-арпеджио · Am", "minutes": 10 } ] }
+    { "name": "Daily", "items": [
+      { "exercise": "Легато · Workout", "minutes": 3 },
+      { "exercise": "Свип-арпеджио · Am", "minutes": 10 },
+      { "choices": [
+        { "exercise": "Секвенция", "random": true, "minutes": 8 },
+        { "exercise": "Лик · Blues", "minutes": 5 }
+      ] }
+    ] }
   ]
 }
 ```
@@ -46,7 +60,9 @@ and never touches history. Ask Claude to produce JSON in this shape and paste it
 - All exercise fields except `name` are optional. An existing exercise with
   the same name is updated with the fields you give.
 - A preset with the same name is replaced. Preset items reference exercises
-  by display name ("Лик · Blues") or plain name when unambiguous.
+  by display name ("Лик · Blues") or plain name when unambiguous. An item is
+  one exercise or `{ "choices": [...] }` of several. With `"random": true` a
+  choice names a generic exercise and stands for any of its variants.
 - Pasting a full backup (it has a `version` field) replaces everything.
 
 ## Development

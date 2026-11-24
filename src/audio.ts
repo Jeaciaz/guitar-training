@@ -31,6 +31,14 @@ export class Audio {
   private config: Running | null = null;
   private nextTime = 0;
   private tick = 0;
+  private beat = 0;
+
+  /**
+   * Called on every click, in sync with what is heard (not with the
+   * scheduler): `beat` counts beats since start, `sub` is the click's
+   * position within the beat (0 = on the beat).
+   */
+  onTick: (beat: number, sub: number, subdivision: number) => void = () => {};
 
   /** Create/resume the context; must run inside a user gesture at least once. */
   unlock(): AudioContext {
@@ -52,6 +60,7 @@ export class Audio {
       const ctx = this.unlock();
       this.nextTime = ctx.currentTime + 0.05;
       this.tick = 0;
+      this.beat = 0;
       this.timer = setInterval(() => this.schedule(), TIMER_MS);
       this.schedule();
     } else if (previous.subdivision !== cmd.subdivision) {
@@ -70,6 +79,8 @@ export class Audio {
     while (this.nextTime < ctx.currentTime + LOOKAHEAD_S) {
       const onBeat = this.tick % cfg.subdivision === 0;
       this.click(ctx, this.nextTime, onBeat ? cfg.volume : cfg.volume * 0.4, onBeat ? 1800 : 1200);
+      if (onBeat) this.beat += 1;
+      this.announce(ctx, this.nextTime, this.beat - 1, this.tick % cfg.subdivision, cfg.subdivision);
       this.nextTime += interval;
       this.tick += 1;
     }
@@ -89,22 +100,12 @@ export class Audio {
     osc.stop(at + 0.04);
   }
 
-  /** Soft two-note chime for "time's up" on a preset item. */
-  chime(volume: number): void {
-    const ctx = this.unlock();
-    const start = ctx.currentTime + 0.02;
-    [880, 1318.5].forEach((freq, i) => {
-      const at = start + i * 0.18;
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = "sine";
-      osc.frequency.value = freq;
-      gain.gain.setValueAtTime(0, at);
-      gain.gain.linearRampToValueAtTime(Math.max(0.15, volume) * 0.6, at + 0.01);
-      gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.6);
-      osc.connect(gain).connect(ctx.destination);
-      osc.start(at);
-      osc.stop(at + 0.65);
-    });
+  private announce(ctx: AudioContext, at: number, beat: number, sub: number, subdivision: number): void {
+    // Output latency: flash when the click is heard, not when it is queued.
+    const latency = (ctx.outputLatency || 0) + (ctx.baseLatency || 0);
+    const delayMs = Math.max(0, (at - ctx.currentTime + latency) * 1000);
+    setTimeout(() => {
+      if (this.config !== null) this.onTick(beat, sub, subdivision);
+    }, delayMs);
   }
 }

@@ -7,6 +7,7 @@ interface ElmOutPort<T> {
 
 interface ElmFlags {
   stored: string | null;
+  legacy: string | null;
   now: number;
 }
 
@@ -15,7 +16,7 @@ interface ElmApp {
     saveState: ElmOutPort<unknown>;
     metronome: ElmOutPort<unknown>;
     wakeLock: ElmOutPort<boolean>;
-    chime: ElmOutPort<number>;
+    theme: ElmOutPort<string>;
   };
 }
 

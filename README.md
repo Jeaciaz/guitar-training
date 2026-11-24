@@ -1,69 +1,59 @@
 # Guitar training
 
-A personal practice-session manager PWA (UI in Russian): exercises with a metronome, presets
-with time targets, and practice stats. Elm app with thin strict-TypeScript
-ports (Web Audio metronome, wake lock, localStorage).
+A personal practice PWA (UI in Russian): a metronome that remembers what you
+play. Elm app with thin strict-TypeScript ports (Web Audio metronome, beat
+pulse, wake lock, theme, localStorage).
 
 Live: https://jeaciaz.github.io/guitar-training/ (on Android Chrome: menu → "Install app").
 
 ## How it works
 
-- **Practice**: tap a preset (or "Quick session") and you're in a session.
-  Switching exercise always starts paused; Play gives a one-bar count-in when
-  the click is on. Only unpaused time counts.
-- **Presets**: when an exercise reaches its target time you get a chime and
-  vibration and "Next" glows; you advance when you're ready.
-- **Slots**: a preset item is a slot of one or more choices, each with its
-  own minutes ("+ или…" in the editor); a session plays one of them. A choice
-  can be a whole group (🎲 Секвенция = any of its variants, or the generic
-  itself if it has none). Picks favour what you haven't played for longer
-  (weight 1 if played today, +1 per day, up to 15), avoid exercises already in
-  the session, and until a pick has been played 🎲 next to it in the session
-  queue rerolls it.
-- **BPM**: an exercise's start BPM only changes when you edit it. During a
-  session the top BPM you actually *played* (held for 10 s, so mis-taps don't
-  count) is recorded; the end-of-session summary offers a one-tap "make N the
-  start BPM".
-- **Forgot to finish?** A session paused for 30+ minutes is saved and closed
-  automatically.
-- **Variants**: open any exercise → "Клонировать в вариант" to make a specific
-  version (e.g. Лик → Blues @ 90). Stats roll variants up under their generic.
-- **Data** lives in the phone's localStorage. Settings → Export backup /
-  Import file for backups.
+- **One screen.** The app opens on the metronome. Tap the ring to start or
+  pause; with the click on, a one-bar count-in plays first. −5/−1/+1/+5
+  change the tempo, the chip below cycles subdivisions, "клик выкл" mutes the
+  click while time keeps running (for video or free play).
+- **Exercises** are a flat list: name, start BPM, subdivision, optional
+  YouTube link. Tap the exercise name → pick one, or type a new name to add it
+  (its start BPM is the current tempo). ± in the list moves a start BPM by 5,
+  ✎ edits. "Без упражнения" is free play. 🎲 suggests something you haven't
+  played for a while, only when asked.
+- **Start BPM** only changes when you change it. When the tempo on screen
+  differs, "старт 88 · сделать 93" makes the current tempo the new start.
+- **Time.** "на упражнении" is the time on the current exercise in this
+  session; "всего" is the session. A session starts on the first tap and is
+  closed after 30 minutes on pause. Only playing time counts; a killed app is
+  paused at its last heartbeat (≤5 s).
+- **Video.** A YouTube link is embedded above the metronome ("▶ видео"); it
+  keeps playing while you change tempo or open other panels. Other links open
+  in a new tab.
+- **Stats**: today / 7 / 30 days, the last 14 days, and time and latest top
+  BPM (held ≥10 s) per exercise over 30 days.
+- **Themes**: Лампа, Хвоя, Песок, Графит (Settings).
+- **Data** lives in the phone's localStorage under `guitar-training-v2`.
+  Settings → Export / Import file for backups.
 
-## Adding exercises/presets with Claude
+## Migration from v1 (presets)
 
-Settings → Paste JSON merges exercises and presets by name (case-insensitive)
-and never touches history. Ask Claude to produce JSON in this shape and paste it:
+On first launch v2 reads the old `guitar-training` key (never writes it): all
+practice time carries over as "без упражнения", exercises and presets are
+dropped. Importing a v1 backup file does the same to the history. If the v2
+data ever fails to parse, the app shows a notice and stops saving instead of
+overwriting it.
+
+## Adding exercises with Claude
+
+Settings → Paste JSON merges exercises by name (case-insensitive):
 
 ```json
-{
-  "exercises": [
-    { "name": "Am", "parent": "Свип-арпеджио", "bpm": 90, "subdivision": 3, "notes": "5-string shape" }
-  ],
-  "presets": [
-    { "name": "Daily", "items": [
-      { "exercise": "Легато · Workout", "minutes": 3 },
-      { "exercise": "Свип-арпеджио · Am", "minutes": 10 },
-      { "choices": [
-        { "exercise": "Секвенция", "random": true, "minutes": 8 },
-        { "exercise": "Лик · Blues", "minutes": 5 }
-      ] }
-    ] }
-  ]
-}
+{ "exercises": [
+  { "name": "Avatar — Crying Fire", "bpm": 88, "video": "https://youtu.be/…" },
+  { "name": "Fours (A minor)", "bpm": 80, "subdivision": 2 }
+] }
 ```
 
-- `parent`: optional; makes the exercise a variant of that generic exercise
-  (shown as "Свип-арпеджио · Am").
-- `subdivision`: clicks per beat — 1 quarters, 2 eighths, 3 triplets, 4 sixteenths.
-- All exercise fields except `name` are optional. An existing exercise with
-  the same name is updated with the fields you give.
-- A preset with the same name is replaced. Preset items reference exercises
-  by display name ("Лик · Blues") or plain name when unambiguous. An item is
-  one exercise or `{ "choices": [...] }` of several. With `"random": true` a
-  choice names a generic exercise and stands for any of its variants.
-- Pasting a full backup (it has a `version` field) replaces everything.
+`subdivision`: 1 quarters, 2 eighths, 3 triplets, 4 sixteenths. Everything
+except `name` is optional. A full backup (with `"version": 2`) replaces
+everything.
 
 ## Development
 
@@ -71,12 +61,24 @@ and never touches history. Ask Claude to produce JSON in this shape and paste it
 npm install
 npm run dev      # vite dev server
 npm test         # elm-test
+npm run review   # elm-review (unused code)
 npm run build    # typecheck + production build
+npm run e2e      # build, then browser checks in headless Chrome (CHROME=… to override)
 ```
 
-Pushing to `main` deploys to GitHub Pages via `.github/workflows/deploy.yml`.
+Pushing to `main` runs tests, review and build, then deploys to GitHub Pages
+via `.github/workflows/deploy.yml`. `e2e` is local only; audio (click,
+count-in, pulse sync) still needs a check on the phone.
 
-- `src/Domain.elm`: session/time accounting and stats (pure, tested)
-- `src/Store.elm`: persisted state, JSON codec, paste-import merge
-- `src/Main.elm`: app, routing, views, ports
-- `src/main.ts`, `src/audio.ts`: ports — storage, metronome, chime, wake lock
+- `src/Session.elm`: the deck and practice-time accounting; both the deck and the
+  live session are opaque, so switching exercise always closes its time first
+- `src/Store.elm`: persisted state and the operations that keep it consistent
+  (switching exercise, start-BPM sync), JSON codec, v1 migration, paste import
+- `src/Exercise.elm`, `src/Bpm.elm`, `src/Theme.elm`: small types (BPM is
+  always 20–400; bad stored values are clamped or defaulted, never fatal)
+- `src/Stats.elm`, `src/Format.elm`: aggregates and Russian display text
+- `src/Main.elm`: pages, update, views, ports
+- `src/main.ts`, `src/audio.ts`: ports — storage, metronome + beat/subdivision pulse, theme, wake lock
+
+`tests/` covers the session maths, the store invariants, the v1 migration
+(on a real export) and a pinned sample of the v2 storage format.

@@ -1,0 +1,166 @@
+{
+  "version": 1,
+  "exercises": [
+    {
+      "id": "song",
+      "name": "Песня",
+      "startBpm": 60,
+      "subdivision": 1,
+      "metronome": true,
+      "notes": "",
+      "archived": false,
+      "parentId": null
+    },
+    {
+      "id": "song-crying-fire",
+      "name": "Avatar — Crying Fire",
+      "startBpm": 88,
+      "subdivision": 1,
+      "metronome": true,
+      "notes": "",
+      "archived": false,
+      "parentId": "song"
+    }
+  ],
+  "presets": [
+    {
+      "id": "technique",
+      "name": "Техника",
+      "items": [
+        {
+          "exerciseId": "legato-workout",
+          "minutes": 3
+        }
+      ]
+    },
+    {
+      "id": "daily",
+      "name": "Ежедневная",
+      "items": [
+        {
+          "choices": [
+            {
+              "exerciseId": "sweep",
+              "minutes": 10,
+              "random": true
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "sessions": [
+    {
+      "id": "s1793383541586",
+      "startedAt": 1793383541586,
+      "endedAt": 1793385839540,
+      "presetId": "p1793268016255",
+      "segments": [
+        {
+          "exerciseId": "legato-workout",
+          "startedAt": 1793383541586,
+          "durationMs": 247349,
+          "startBpm": 70,
+          "maxBpm": 70
+        },
+        {
+          "exerciseId": "sequence-fours",
+          "startedAt": 1793383875761,
+          "durationMs": 459804,
+          "startBpm": 80,
+          "maxBpm": 100
+        },
+        {
+          "exerciseId": "lick-blues",
+          "startedAt": 1793384355247,
+          "durationMs": 608084,
+          "startBpm": 90,
+          "maxBpm": 95
+        },
+        {
+          "exerciseId": "rhythm-blues",
+          "startedAt": 1793385293984,
+          "durationMs": 259511,
+          "startBpm": 90,
+          "maxBpm": 90
+        }
+      ]
+    },
+    {
+      "id": "s1793288358788",
+      "startedAt": 1793288358788,
+      "endedAt": 1793290723692,
+      "presetId": "p1793268016256",
+      "segments": [
+        {
+          "exerciseId": "legato-workout",
+          "startedAt": 1793288358788,
+          "durationMs": 224573,
+          "startBpm": 70,
+          "maxBpm": 70
+        },
+        {
+          "exerciseId": "e1793266883856",
+          "startedAt": 1793288662764,
+          "durationMs": 463669,
+          "startBpm": 60,
+          "maxBpm": 60
+        },
+        {
+          "exerciseId": "sweep-e",
+          "startedAt": 1793289205036,
+          "durationMs": 615365,
+          "startBpm": 80,
+          "maxBpm": 100
+        },
+        {
+          "exerciseId": "song-crying-fire",
+          "startedAt": 1793289918814,
+          "durationMs": 763026,
+          "startBpm": 88,
+          "maxBpm": 93
+        }
+      ]
+    },
+    {
+      "id": "s1793218028152",
+      "startedAt": 1793218028152,
+      "endedAt": 1793221109152,
+      "presetId": "technique",
+      "segments": [
+        {
+          "exerciseId": "legato-workout",
+          "startedAt": 1793218028152,
+          "durationMs": 261184,
+          "startBpm": 80,
+          "maxBpm": 80
+        },
+        {
+          "exerciseId": "sequence-fours",
+          "startedAt": 1793218360403,
+          "durationMs": 440600,
+          "startBpm": 90,
+          "maxBpm": 90
+        },
+        {
+          "exerciseId": "sequence-slash",
+          "startedAt": 1793219601916,
+          "durationMs": 612332,
+          "startBpm": 100,
+          "maxBpm": 120
+        },
+        {
+          "exerciseId": "sweep-e",
+          "startedAt": 1793220311918,
+          "durationMs": 607705,
+          "startBpm": 90,
+          "maxBpm": 90
+        }
+      ]
+    }
+  ],
+  "live": null,
+  "settings": {
+    "volume": 0.65
+  }
+}

@@ -1,0 +1,70 @@
+<!doctype html>
+<meta charset="utf-8" />
+<!--
+  Test-only page (copied into dist/ by e2e/run.mjs, never deployed): resets
+  localStorage to a known state, then opens the app.
+
+  ?mode=v1         only the v1 export under the legacy key (migration)
+  otherwise        a v2 store written in the first v2 build's format:
+    theme=…        settings.theme
+    live=0         no session in progress
+    run=1          the open segment was left running (tests reload restore)
+    click=0        click off
+    ex=none        free play on the deck
+  route=…          open #/<route>
+-->
+<script type="module">
+  const p = new URLSearchParams(location.search);
+  localStorage.clear();
+  const now = Date.now();
+  if (p.get("mode") === "v1") {
+    const v1 = await (await fetch("./v1-export.json")).text();
+    localStorage.setItem("guitar-training", v1);
+  } else {
+    const ex = (id, name, bpm, sub, video) => ({ id, name, startBpm: bpm, subdivision: sub, video });
+    const day = 86400000;
+    const store = {
+      version: 2,
+      exercises: [
+        ex("e1", "Avatar — Crying Fire", 88, 1, "https://youtu.be/dQw4w9WgXcQ"),
+        ex("e2", "Slash's sequence", 90, 2, ""),
+        ex("e3", "Fours (A minor)", 80, 2, ""),
+        ex("e4", "Свип · E", 80, 2, ""),
+        ex("e5", "Legato workout", 70, 2, ""),
+      ],
+      sessions: [
+        {
+          id: "s1",
+          startedAt: now - 2 * day,
+          endedAt: now - 2 * day + 1800000,
+          segments: [
+            { exerciseId: "e2", startedAt: now - 2 * day, durationMs: 900000, startBpm: 90, maxBpm: 110 },
+            { exerciseId: null, startedAt: now - 2 * day + 900000, durationMs: 600000, startBpm: 0, maxBpm: 0 },
+          ],
+        },
+      ],
+      live:
+        p.get("live") === "0"
+          ? null
+          : {
+              id: "s2",
+              startedAt: now - 600000,
+              heartbeat: now,
+              segments: [{ exerciseId: "e5", startedAt: now - 600000, durationMs: 180000, startBpm: 70, maxBpm: 75 }],
+              open: {
+                exerciseId: "e1",
+                startedAt: now - 300000,
+                startBpm: 88,
+                maxBpm: 0,
+                accumulatedMs: 252000,
+                runningSince: p.get("run") === "1" ? now : null,
+                bpmMark: 0,
+              },
+            },
+      deck: { exerciseId: p.get("ex") === "none" ? null : "e1", bpm: 93, subdivision: 1, clickOn: p.get("click") !== "0" },
+      settings: { volume: 0.8, theme: p.get("theme") || "lamp" },
+    };
+    localStorage.setItem("guitar-training-v2", JSON.stringify(store));
+  }
+  location.replace("./" + (p.get("route") ? "#/" + p.get("route") : ""));
+</script>

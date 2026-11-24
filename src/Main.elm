@@ -1,23 +1,29 @@
 port module Main exposing (main)
 
+import Bpm
 import Browser
 import Browser.Events
 import Browser.Navigation as Nav
 import Dict
-import Domain exposing (Active, Choice, Exercise, LiveSession, PlanItem, Preset, PresetItem, Session)
+import Exercise exposing (Exercise, Subdivision)
 import File exposing (File)
 import File.Download
 import File.Select
-import Html exposing (Html, a, button, details, div, h1, h2, input, label, main_, nav, option, p, pre, select, span, summary, text, textarea)
-import Html.Attributes exposing (attribute, checked, class, classList, disabled, href, placeholder, rows, style, title, type_, value)
-import Html.Events exposing (on, onCheck, onClick, onInput, preventDefaultOn)
+import Format
+import Html exposing (..)
+import Html.Attributes exposing (..)
+import Html.Events exposing (onClick, onInput, onSubmit)
+import Html.Keyed
 import Json.Decode as D
 import Json.Encode as E
 import Random
+import Session
+import Stats
 import Store exposing (Store)
 import Svg
 import Svg.Attributes as SA
 import Task
+import Theme exposing (Theme)
 import Time
 import Url exposing (Url)
 
@@ -29,97 +35,85 @@ import Url exposing (Url)
 port saveState : E.Value -> Cmd msg
 
 
+{-| `{ running: false }` or `{ running: true, bpm, subdivision, volume }`.
+-}
 port metronome : E.Value -> Cmd msg
 
 
 port wakeLock : Bool -> Cmd msg
 
 
-port chime : Float -> Cmd msg
+port theme : String -> Cmd msg
 
 
 
 -- MODEL
 
 
-type Route
-    = Home
-    | SessionRoute
-    | Summary String
-    | Library
-    | EditExercise (Maybe String)
-    | NewVariant String
-    | EditPreset (Maybe String)
-    | Stats
-    | Settings
-
-
-type alias ExerciseForm =
-    { id : Maybe String
-    , parentId : Maybe String
-    , name : String
-    , bpm : String
-    , subdivision : Int
-    , metronome : Bool
-    , notes : String
-    }
-
-
-type alias PresetForm =
-    { id : Maybe String
-    , name : String
-    , items : List FormSlot
-    }
-
-
-type alias FormSlot =
-    { choices : List FormChoice
-    }
-
-
-type alias FormChoice =
-    { exerciseId : String
-    , minutes : String
-    , random : Bool
-    }
-
-
-type Form
-    = NoForm
-    | ExForm ExerciseForm
-    | PrForm PresetForm
-
-
 type alias Model =
     { key : Nav.Key
-    , route : Route
+    , page : Page
+    , pushed : Bool
     , store : Store
+    , persistence : Persistence
     , now : Int
     , zone : Time.Zone
-    , form : Form
-    , picker : Bool
-    , drag : Maybe Drag
-    , confirmFinish : Bool
-    , confirmDelete : Bool
-    , importText : String
-    , notice : Maybe ( Bool, String )
+    , videoOpen : Bool
+    , startupNotice : Maybe String
     }
 
 
-{-| A preset slot being dragged by its handle. `heights` are all slots'
-heights at drag start (they differ), so the drop index follows from how far
-the pointer moved.
+{-| `ReadOnly` when the saved data couldn't be read: it is left untouched
+until the user restores a backup.
 -}
-type alias Drag =
-    { from : Int
-    , startY : Float
-    , y : Float
-    , heights : List Float
+type Persistence
+    = Persist
+    | ReadOnly
+
+
+{-| The panel over the metronome screen, with its own state. The metronome
+screen itself stays rendered underneath, so a playing video isn't torn down.
+-}
+type Page
+    = Home
+    | Pick PickState
+    | Edit EditState
+    | EditMissing
+    | Stats
+    | Settings SettingsState
+
+
+type alias PickState =
+    { query : String
+    , suggested : Maybe String
+    }
+
+
+type alias EditState =
+    { form : Form
+    , confirmDelete : Bool
+    , error : Maybe String
+    }
+
+
+type alias Form =
+    { id : String
+    , name : String
+    , bpm : String
+    , subdivision : Subdivision
+    , video : String
+    }
+
+
+type alias SettingsState =
+    { importText : String
+    , message : Maybe String
     }
 
 
 type alias Flags =
     { stored : Maybe String
+    , legacy : Maybe String
     , now : Int
     }
 
@@ -127,66 +121,48 @@ type alias Flags =
 init : Flags -> Url -> Nav.Key -> ( Model, Cmd Msg )
 init flags url key =
     let
-        loaded =
-            flags.stored
-                |> Maybe.andThen (D.decodeString Store.decoder >> Result.toMaybe)
-                |> Maybe.withDefault Store.empty
+        ( loaded, persistence, notice ) =
+            case ( flags.stored, flags.legacy ) of
+                ( Just json, _ ) ->
+                    case D.decodeString Store.decoder json of
+                        Ok s ->
+                            ( s, Persist, Nothing )
 
-        -- Data saved before the app was translated has the English name.
-        renameFreePlay e =
-            if e.id == "free" && e.name == "Free play" then
-                { e | name = "Свободная игра", notes = "Импровизация, джем, просто поиграть. Тоже идёт в общее время." }
+                        Err _ ->
+                            ( Store.empty, ReadOnly, Nothing )
 
-            else
-                e
+                ( Nothing, Just json ) ->
+                    case D.decodeString Store.legacyDecoder json of
+                        Ok s ->
+                            ( s, Persist, Nothing )
 
-        -- Sessions saved before plans existed get one from their preset.
-        withPlan live =
-            if List.isEmpty live.plan then
-                { live | plan = planFor flags.now (Random.initialSeed live.startedAt) loaded live.presetId }
+                        Err _ ->
+                            ( Store.empty, Persist, Just "Не удалось перенести историю из старой версии." )
 
-            else
-                live
+                ( Nothing, Nothing ) ->
+                    ( Store.empty, Persist, Nothing )
 
-        restored =
-            { loaded
-                | live = Maybe.map (Domain.restore >> withPlan) loaded.live
-                , exercises = List.map renameFreePlay loaded.exercises
-            }
-
-        base =
-            { key = key
-            , route = parseRoute url
-            , store = restored
-            , now = flags.now
-            , zone = Time.utc
-            , form = NoForm
-            , picker = False
-            , drag = Nothing
-            , confirmFinish = False
-            , confirmDelete = False
-            , importText = ""
-            , notice = Nothing
-            }
-
-        ( model, cmd ) =
-            case restored.live of
-                Just live ->
-                    if Domain.isIdle flags.now live then
-                        finishLive flags.now base
-
-                    else
-                        ( base, Cmd.none )
-
-                Nothing ->
-                    ( base, Cmd.none )
+        store =
+            Store.closeIfIdle flags.now loaded
     in
-    ( enterRoute model
+    ( { key = key
+      , page = pageFor store (parseRoute url)
+      , pushed = False
+      , store = store
+      , persistence = persistence
+      , now = flags.now
+      , zone = Time.utc
+      , videoOpen = False
+      , startupNotice = notice
+      }
     , Cmd.batch
-        [ cmd
-        , Task.perform GotZone Time.here
-        , wakeLock (model.store.live /= Nothing)
-        , saveState (Store.encode model.store)
+        [ Task.perform GotZone Time.here
+        , theme (Theme.id store.settings.theme)
+        , if persistence == Persist then
+            saveState (Store.encode store)
+
+          else
+            Cmd.none
         ]
     )
 
@@ -195,223 +171,146 @@ init flags url key =
 -- ROUTING
 
 
+type Route
+    = HomeRoute
+    | PickRoute
+    | EditRoute String
+    | StatsRoute
+    | SettingsRoute
+
+
 parseRoute : Url -> Route
 parseRoute url =
     case String.split "/" (Maybe.withDefault "" url.fragment) |> List.filter ((/=) "") of
-        [ "session" ] ->
-            SessionRoute
+        [ "pick" ] ->
+            PickRoute
 
-        [ "summary", id ] ->
-            Summary id
-
-        [ "library" ] ->
-            Library
-
-        [ "exercise", "new" ] ->
-            EditExercise Nothing
-
-        [ "exercise", "variant", id ] ->
-            NewVariant id
-
-        [ "exercise", id ] ->
-            EditExercise (Just id)
-
-        [ "preset", "new" ] ->
-            EditPreset Nothing
-
-        [ "preset", id ] ->
-            EditPreset (Just id)
+        [ "ex", id ] ->
+            EditRoute id
 
         [ "stats" ] ->
-            Stats
+            StatsRoute
 
         [ "settings" ] ->
-            Settings
+            SettingsRoute
 
         _ ->
-            Home
+            HomeRoute
 
 
 routeHref : Route -> String
 routeHref route =
     "#/"
         ++ (case route of
-                Home ->
+                HomeRoute ->
                     ""
 
-                SessionRoute ->
-                    "session"
+                PickRoute ->
+                    "pick"
 
-                Summary id ->
-                    "summary/" ++ id
+                EditRoute id ->
+                    "ex/" ++ id
 
-                Library ->
-                    "library"
-
-                EditExercise Nothing ->
-                    "exercise/new"
-
-                EditExercise (Just id) ->
-                    "exercise/" ++ id
-
-                NewVariant id ->
-                    "exercise/variant/" ++ id
-
-                EditPreset Nothing ->
-                    "preset/new"
-
-                EditPreset (Just id) ->
-                    "preset/" ++ id
-
-                Stats ->
+                StatsRoute ->
                     "stats"
 
-                Settings ->
+                SettingsRoute ->
                     "settings"
            )
 
 
-go : Model -> Route -> Cmd Msg
-go model route =
-    Nav.pushUrl model.key (routeHref route)
+pageFor : Store -> Route -> Page
+pageFor store route =
+    case route of
+        HomeRoute ->
+            Home
 
+        PickRoute ->
+            Pick { query = "", suggested = Nothing }
 
-{-| Set up per-page state when a route is entered.
--}
-enterRoute : Model -> Model
-enterRoute model =
-    let
-        reset =
-            { model | picker = False, drag = Nothing, confirmFinish = False, confirmDelete = False, notice = Nothing }
-    in
-    case model.route of
-        EditExercise id ->
-            let
-                existing =
-                    id |> Maybe.andThen (findExercise model.store)
-            in
-            { reset
-                | form =
-                    ExForm
-                        { id = Maybe.map .id existing
-                        , parentId = existing |> Maybe.andThen .parentId
-                        , name = existing |> Maybe.map .name |> Maybe.withDefault ""
-                        , bpm = existing |> Maybe.map (.startBpm >> String.fromInt) |> Maybe.withDefault "60"
-                        , subdivision = existing |> Maybe.map .subdivision |> Maybe.withDefault 1
-                        , metronome = existing |> Maybe.map .metronome |> Maybe.withDefault True
-                        , notes = existing |> Maybe.map .notes |> Maybe.withDefault ""
+        EditRoute id ->
+            case Store.findExercise store id of
+                Just e ->
+                    Edit
+                        { form =
+                            { id = e.id
+                            , name = e.name
+                            , bpm = String.fromInt (Bpm.toInt e.startBpm)
+                            , subdivision = e.subdivision
+                            , video = Maybe.withDefault "" e.video
+                            }
+                        , confirmDelete = False
+                        , error = Nothing
                         }
-            }
-
-        NewVariant sourceId ->
-            -- Cloning a variant makes a sibling: variants are one level deep.
-            case findExercise model.store sourceId of
-                Just source ->
-                    { reset
-                        | form =
-                            ExForm
-                                { id = Nothing
-                                , parentId = Just (Maybe.withDefault source.id source.parentId)
-                                , name = ""
-                                , bpm = String.fromInt source.startBpm
-                                , subdivision = source.subdivision
-                                , metronome = source.metronome
-                                , notes = ""
-                                }
-                    }
 
                 Nothing ->
-                    { reset | form = NoForm }
+                    EditMissing
 
-        EditPreset id ->
-            let
-                existing =
-                    id |> Maybe.andThen (findPreset model.store)
-            in
-            { reset
-                | form =
-                    PrForm
-                        { id = Maybe.map .id existing
-                        , name = existing |> Maybe.map .name |> Maybe.withDefault ""
-                        , items =
-                            existing
-                                |> Maybe.map .items
-                                |> Maybe.withDefault []
-                                |> List.map
-                                    (\i ->
-                                        { choices =
-                                            List.map (\c -> { exerciseId = c.exerciseId, minutes = String.fromInt c.minutes, random = c.random }) i.choices
-                                        }
-                                    )
-                        }
-            }
+        StatsRoute ->
+            Stats
 
-        SessionRoute ->
-            { reset | picker = Maybe.andThen .active model.store.live == Nothing }
+        SettingsRoute ->
+            Settings { importText = "", message = Nothing }
 
-        _ ->
-            { reset | form = NoForm }
+
+{-| Back to the previous screen: `back` when we navigated here (so Android's
+back gesture and ✕ agree), otherwise replace with Home.
+-}
+close : Model -> Cmd Msg
+close model =
+    if model.pushed then
+        Nav.back model.key 1
+
+    else
+        Nav.replaceUrl model.key (routeHref HomeRoute)
 
 
 
 -- UPDATE
 
 
-{-| Session actions are stamped with a fresh `Time.now` so a throttled tick
-never skews the time accounting.
+{-| Actions that need the exact current time.
 -}
 type Action
-    = StartPreset String
-    | StartQuick
-    | SelectExercise String
-    | NextExercise
-    | Reroll Int
-    | TogglePlay
-    | BumpBpm Int
-    | SetSubdivision Int
-    | ToggleClick
-    | FinishSession
+    = TogglePlay
+    | Bump Int
+    | Choose (Maybe String)
+    | SubmitSearch String
+    | Create String
+    | Suggest
+    | DeleteExercise String
+    | ApplyImport String
     | Tick
 
 
 type Msg
-    = UrlChanged Url
-    | LinkClicked Browser.UrlRequest
+    = Act Action
+    | Run Action Time.Posix
     | GotZone Time.Zone
-    | Act Action
-    | Do Action Time.Posix
-    | TogglePicker
-    | AskFinish Bool
-    | AskDelete Bool
-    | DiscardSession
-    | PromoteBpm String Int
-    | DeleteSession String
-    | ExName String
-    | ExBpm String
-    | ExSubdivision Int
-    | ExMetronome Bool
-    | ExNotes String
-    | SaveExercise
-    | DeleteExercise String
-    | RestoreExercise String
-    | PrName String
-    | PrChoiceExercise Int Int String
-    | PrChoiceMinutes Int Int String
-    | PrChoiceRemove Int Int
-    | PrAddChoice Int
-    | DragStart Int Float (List Float)
-    | DragMove Float
-    | DragEnd
-    | PrAddItem String
-    | SavePreset
-    | DeletePreset String
+    | LinkClicked Browser.UrlRequest
+    | UrlChanged Url
+    | VisibilityChanged Browser.Events.Visibility
+    | Close
+    | ToggleClick
+    | CycleSubdivision
+    | MakeStart
+    | ToggleVideo
+    | StartBump String Int
+    | QueryChanged String
+    | FormName String
+    | FormBpm String
+    | FormBpmBump Int
+    | FormSubdivision Subdivision
+    | FormVideo String
+    | SaveForm
+    | AskDelete
+    | SetTheme Theme
     | SetVolume Float
     | Export
     | ImportFile
-    | GotFile File
-    | GotFileText String
+    | FileSelected File
+    | FileLoaded String
     | ImportTextChanged String
-    | ApplyImport
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -423,23 +322,28 @@ update msg model =
     ( next, Cmd.batch [ cmd, effects model next ] )
 
 
-{-| Sync the outside world (storage, metronome, wake lock) with the model.
+{-| Side effects that follow from state changes.
 -}
 effects : Model -> Model -> Cmd Msg
 effects old new =
     Cmd.batch
-        [ if old.store /= new.store then
+        [ if click old /= click new then
+            metronome (encodeClick (click new))
+
+          else
+            Cmd.none
+        , if Store.isRunning old.store /= Store.isRunning new.store then
+            wakeLock (Store.isRunning new.store)
+
+          else
+            Cmd.none
+        , if old.store /= new.store && new.persistence == Persist then
             saveState (Store.encode new.store)
 
           else
             Cmd.none
-        , if metronomeState old /= metronomeState new then
-            metronome (encodeMetronome (metronomeState new))
-
-          else
-            Cmd.none
-        , if (old.store.live == Nothing) /= (new.store.live == Nothing) then
-            wakeLock (new.store.live /= Nothing)
+        , if old.store.settings.theme /= new.store.settings.theme then
+            theme (Theme.id new.store.settings.theme)
 
           else
             Cmd.none
@@ -450,29 +354,28 @@ type alias Click =
     { bpm : Int, subdivision : Int, volume : Float }
 
 
-metronomeState : Model -> Maybe Click
-metronomeState model =
-    model.store.live
-        |> Maybe.andThen .active
-        |> Maybe.andThen
-            (\a ->
-                if a.runningSince /= Nothing && a.metronomeOn then
-                    Just { bpm = a.bpm, subdivision = a.subdivision, volume = model.store.settings.volume }
+click : Model -> Maybe Click
+click { store } =
+    if Store.isRunning store && Session.clickOn store.deck then
+        Just
+            { bpm = Bpm.toInt (Session.bpm store.deck)
+            , subdivision = Exercise.perBeat (Store.subdivision store)
+            , volume = store.settings.volume
+            }
 
-                else
-                    Nothing
-            )
+    else
+        Nothing
 
 
-encodeMetronome : Maybe Click -> E.Value
-encodeMetronome state =
-    case state of
-        Just c ->
+encodeClick : Maybe Click -> E.Value
+encodeClick c =
+    case c of
+        Just { bpm, subdivision, volume } ->
             E.object
                 [ ( "running", E.bool True )
-                , ( "bpm", E.int c.bpm )
-                , ( "subdivision", E.int c.subdivision )
-                , ( "volume", E.float c.volume )
+                , ( "bpm", E.int bpm )
+                , ( "subdivision", E.int subdivision )
+                , ( "volume", E.float volume )
                 ]
 
         Nothing ->
@@ -482,643 +385,337 @@ encodeMetronome state =
 updateModel : Msg -> Model -> ( Model, Cmd Msg )
 updateModel msg model =
     case msg of
-        UrlChanged url ->
-            ( enterRoute { model | route = parseRoute url }, Cmd.none )
+        Act action ->
+            ( model, Task.perform (Run action) Time.now )
 
-        LinkClicked (Browser.Internal url) ->
-            ( model, Nav.pushUrl model.key (Url.toString url) )
-
-        LinkClicked (Browser.External href) ->
-            ( model, Nav.load href )
+        Run action posix ->
+            let
+                now =
+                    Time.posixToMillis posix
+            in
+            act action now { model | now = now }
 
         GotZone zone ->
             ( { model | zone = zone }, Cmd.none )
 
-        Act action ->
-            ( model, Task.perform (Do action) Time.now )
+        LinkClicked (Browser.Internal url) ->
+            ( { model | pushed = True }, Nav.pushUrl model.key (Url.toString url) )
 
-        Do action posix ->
-            act action (Time.posixToMillis posix) { model | now = Time.posixToMillis posix }
+        LinkClicked (Browser.External href) ->
+            ( model, Nav.load href )
 
-        TogglePicker ->
-            ( { model | picker = not model.picker }, Cmd.none )
+        UrlChanged url ->
+            let
+                route =
+                    parseRoute url
+            in
+            ( { model
+                | page = pageFor model.store route
+                , pushed = model.pushed && route /= HomeRoute
+                , startupNotice = Nothing
+              }
+              -- "Today" may have moved on while nothing was ticking.
+            , Task.perform (Run Tick) Time.now
+            )
 
-        AskFinish b ->
-            ( { model | confirmFinish = b }, Cmd.none )
+        VisibilityChanged Browser.Events.Visible ->
+            ( model, Task.perform (Run Tick) Time.now )
 
-        AskDelete b ->
-            ( { model | confirmDelete = b }, Cmd.none )
+        VisibilityChanged Browser.Events.Hidden ->
+            ( model, Cmd.none )
 
-        DiscardSession ->
-            ( mapStore (\s -> { s | live = Nothing }) { model | confirmFinish = False }, go model Home )
+        Close ->
+            ( model, close model )
 
-        PromoteBpm exId bpm ->
+        ToggleClick ->
+            ( mapStore (\s -> { s | deck = Session.toggleClick s.deck }) model, Cmd.none )
+
+        CycleSubdivision ->
+            ( mapStore (\s -> Store.setSubdivision (Exercise.nextSubdivision (Store.subdivision s)) s) model, Cmd.none )
+
+        MakeStart ->
             ( mapStore
-                (\s -> { s | exercises = updateExercise exId (\e -> { e | startBpm = bpm }) s.exercises })
+                (\s ->
+                    case Store.currentExercise s of
+                        Just e ->
+                            Store.updateExercise e.id (\x -> { x | startBpm = Session.bpm s.deck }) s
+
+                        Nothing ->
+                            s
+                )
                 model
             , Cmd.none
             )
 
-        DeleteSession id ->
-            ( mapStore (\s -> { s | sessions = List.filter (\x -> x.id /= id) s.sessions }) model
-            , Nav.back model.key 1
-            )
+        ToggleVideo ->
+            ( { model | videoOpen = not model.videoOpen }, Cmd.none )
 
-        ExName v ->
-            ( mapExForm (\f -> { f | name = v }) model, Cmd.none )
+        StartBump id delta ->
+            ( mapStore (Store.updateExercise id (\e -> { e | startBpm = Bpm.add delta e.startBpm })) model, Cmd.none )
 
-        ExBpm v ->
-            ( mapExForm (\f -> { f | bpm = v }) model, Cmd.none )
+        QueryChanged q ->
+            ( mapPick (\p -> { p | query = q }) model, Cmd.none )
 
-        ExSubdivision v ->
-            ( mapExForm (\f -> { f | subdivision = v }) model, Cmd.none )
+        FormName s ->
+            ( mapForm (\f -> { f | name = s }) model, Cmd.none )
 
-        ExMetronome v ->
-            ( mapExForm (\f -> { f | metronome = v }) model, Cmd.none )
+        FormBpm s ->
+            ( mapForm (\f -> { f | bpm = s }) model, Cmd.none )
 
-        ExNotes v ->
-            ( mapExForm (\f -> { f | notes = v }) model, Cmd.none )
-
-        SaveExercise ->
-            case model.form of
-                ExForm f ->
-                    case ( String.trim f.name, String.toInt f.bpm ) of
-                        ( "", _ ) ->
-                            ( { model | notice = Just ( False, "Введите название." ) }, Cmd.none )
-
-                        ( _, Nothing ) ->
-                            ( { model | notice = Just ( False, "BPM должен быть числом." ) }, Cmd.none )
-
-                        ( name, Just bpm ) ->
-                            let
-                                apply e =
-                                    { e
-                                        | name = name
-                                        , startBpm = Domain.clampBpm bpm
-                                        , subdivision = f.subdivision
-                                        , metronome = f.metronome
-                                        , notes = String.trim f.notes
-                                    }
-
-                                store =
-                                    model.store
-
-                                exercises =
-                                    case f.id of
-                                        Just id ->
-                                            updateExercise id apply store.exercises
-
-                                        Nothing ->
-                                            store.exercises
-                                                ++ [ apply
-                                                        { id = freshId "e" model
-                                                        , name = ""
-                                                        , startBpm = 0
-                                                        , subdivision = 1
-                                                        , metronome = True
-                                                        , notes = ""
-                                                        , archived = False
-                                                        , parentId = f.parentId
-                                                        }
-                                                   ]
-                            in
-                            ( { model | store = { store | exercises = exercises } }
-                              -- A new variant was cloned from the generic's page: return past it.
-                            , Nav.back model.key
-                                (if f.id == Nothing && f.parentId /= Nothing then
-                                    2
-
-                                 else
-                                    1
-                                )
-                            )
-
-                _ ->
-                    ( model, Cmd.none )
-
-        DeleteExercise id ->
-            if List.any (\e -> e.parentId == Just id && not e.archived) model.store.exercises then
-                ( { model | notice = Just ( False, "Сначала удалите варианты этого упражнения." ) }, Cmd.none )
-
-            else
-                let
-                    used =
-                        List.any (.segments >> List.any (\seg -> seg.exerciseId == id)) model.store.sessions
-
-                    dropFromPresets =
-                        List.map
-                            (\p ->
-                                { p
-                                    | items =
-                                        p.items
-                                            |> List.map (\i -> { i | choices = List.filter (\c -> c.exerciseId /= id) i.choices })
-                                            |> List.filter (not << List.isEmpty << .choices)
-                                }
-                            )
-                in
-                ( mapStore
-                    (\s ->
-                        { s
-                            | exercises =
-                                if used then
-                                    updateExercise id (\e -> { e | archived = True }) s.exercises
-
-                                else
-                                    List.filter (\e -> e.id /= id) s.exercises
-                            , presets = dropFromPresets s.presets
-                        }
-                    )
-                    model
-                , Nav.back model.key 1
-                )
-
-        RestoreExercise id ->
-            ( mapStore (\s -> { s | exercises = updateExercise id (\e -> { e | archived = False }) s.exercises }) model
-            , Cmd.none
-            )
-
-        PrName v ->
-            ( mapPrForm (\f -> { f | name = v }) model, Cmd.none )
-
-        PrChoiceExercise i j v ->
-            let
-                ( exId, random ) =
-                    parseItemKey v
-            in
-            ( mapChoice i j (\c -> { c | exerciseId = exId, random = random }) model, Cmd.none )
-
-        PrChoiceMinutes i j v ->
-            ( mapChoice i j (\c -> { c | minutes = v }) model, Cmd.none )
-
-        PrChoiceRemove i j ->
-            ( mapPrForm
+        FormBpmBump delta ->
+            ( mapForm
                 (\f ->
                     { f
-                        | items =
-                            f.items
-                                |> updateAt i (\sl -> { sl | choices = List.take j sl.choices ++ List.drop (j + 1) sl.choices })
-                                |> List.filter (not << List.isEmpty << .choices)
+                        | bpm =
+                            String.toInt f.bpm
+                                |> Maybe.withDefault 80
+                                |> Bpm.fromInt
+                                |> Bpm.add delta
+                                |> Bpm.toInt
+                                |> String.fromInt
                     }
                 )
                 model
             , Cmd.none
             )
 
-        PrAddChoice i ->
-            let
-                -- Start with a group the slot doesn't offer yet; the select changes it.
-                fresh sl =
-                    libraryOrder model.store
-                        |> List.filter (\ex -> ex.parentId == Nothing && not (List.any (\c -> c.random && c.exerciseId == ex.id) sl.choices))
-                        |> List.head
-                        |> Maybe.map (\ex -> [ { exerciseId = ex.id, minutes = "5", random = True } ])
-                        |> Maybe.withDefault []
-            in
-            ( mapPrForm (\f -> { f | items = updateAt i (\sl -> { sl | choices = sl.choices ++ fresh sl }) f.items }) model, Cmd.none )
+        FormSubdivision sub ->
+            ( mapForm (\f -> { f | subdivision = sub }) model, Cmd.none )
 
-        DragStart i y heights ->
-            ( { model | drag = Just { from = i, startY = y, y = y, heights = heights } }, Cmd.none )
+        FormVideo s ->
+            ( mapForm (\f -> { f | video = s }) model, Cmd.none )
 
-        DragMove y ->
-            ( { model | drag = Maybe.map (\d -> { d | y = y }) model.drag }, Cmd.none )
+        SaveForm ->
+            case model.page of
+                Edit state ->
+                    case validate state.form of
+                        Ok apply ->
+                            ( mapStore (Store.updateExercise state.form.id apply) model, close model )
 
-        DragEnd ->
-            case ( model.drag, model.form ) of
-                ( Just d, PrForm _ ) ->
-                    ( mapPrForm (\form -> { form | items = move d.from (dropIndex d) form.items })
-                        { model | drag = Nothing }
-                    , Cmd.none
-                    )
-
-                _ ->
-                    ( { model | drag = Nothing }, Cmd.none )
-
-        PrAddItem key ->
-            let
-                ( exId, random ) =
-                    parseItemKey key
-            in
-            ( mapPrForm (\f -> { f | items = f.items ++ [ { choices = [ { exerciseId = exId, minutes = "5", random = random } ] } ] }) { model | picker = False }
-            , Cmd.none
-            )
-
-        SavePreset ->
-            case model.form of
-                PrForm f ->
-                    let
-                        items =
-                            f.items
-                                |> List.map
-                                    (\sl ->
-                                        { choices =
-                                            List.map
-                                                (\c ->
-                                                    { exerciseId = c.exerciseId
-                                                    , minutes = String.toInt c.minutes |> Maybe.withDefault 5 |> clamp 1 600
-                                                    , random = c.random
-                                                    }
-                                                )
-                                                sl.choices
-                                        }
-                                    )
-                                |> Domain.dedupeItems
-                    in
-                    if String.trim f.name == "" then
-                        ( { model | notice = Just ( False, "Введите название." ) }, Cmd.none )
-
-                    else if List.isEmpty items then
-                        ( { model | notice = Just ( False, "Добавьте хотя бы одно упражнение." ) }, Cmd.none )
-
-                    else
-                        let
-                            preset =
-                                { id = Maybe.withDefault (freshId "p" model) f.id
-                                , name = String.trim f.name
-                                , items = items
-                                }
-                        in
-                        ( mapStore
-                            (\s ->
-                                { s
-                                    | presets =
-                                        if f.id == Nothing then
-                                            s.presets ++ [ preset ]
-
-                                        else
-                                            List.map
-                                                (\p ->
-                                                    if p.id == preset.id then
-                                                        preset
-
-                                                    else
-                                                        p
-                                                )
-                                                s.presets
-                                }
-                            )
-                            model
-                        , Nav.back model.key 1
-                        )
+                        Err error ->
+                            ( { model | page = Edit { state | error = Just error } }, Cmd.none )
 
                 _ ->
                     ( model, Cmd.none )
 
-        DeletePreset id ->
-            ( mapStore (\s -> { s | presets = List.filter (\p -> p.id /= id) s.presets }) model
-            , Nav.back model.key 1
-            )
+        AskDelete ->
+            case model.page of
+                Edit state ->
+                    ( { model | page = Edit { state | confirmDelete = True } }, Cmd.none )
+
+                _ ->
+                    ( model, Cmd.none )
+
+        SetTheme t ->
+            ( mapSettings (\s -> { s | theme = t }) model, Cmd.none )
 
         SetVolume v ->
-            ( mapStore (\s -> { s | settings = { volume = v } }) model, Cmd.none )
+            ( mapSettings (\s -> { s | volume = clamp 0 1 v }) model, Cmd.none )
 
         Export ->
             ( model
             , File.Download.string
-                ("guitar-training-" ++ String.fromInt (Domain.dayKey model.zone model.now) ++ ".json")
+                ("guitar-" ++ Format.dayStamp model.zone model.now ++ ".json")
                 "application/json"
                 (E.encode 2 (Store.encode model.store))
             )
 
         ImportFile ->
-            ( model, File.Select.file [ "application/json", ".json" ] GotFile )
+            ( model, File.Select.file [ "application/json", ".json" ] FileSelected )
 
-        GotFile file ->
-            ( model, Task.perform GotFileText (File.toString file) )
+        FileSelected file ->
+            ( model, Task.perform FileLoaded (File.toString file) )
 
-        GotFileText text ->
-            applyImport text model
+        FileLoaded text ->
+            ( model, Task.perform (Run (ApplyImport text)) Time.now )
 
-        ImportTextChanged v ->
-            ( { model | importText = v }, Cmd.none )
-
-        ApplyImport ->
-            applyImport model.importText model
+        ImportTextChanged s ->
+            ( mapSettingsPage (\p -> { p | importText = s }) model, Cmd.none )
 
 
-applyImport : String -> Model -> ( Model, Cmd Msg )
-applyImport text model =
-    case Store.mergeImport model.now text model.store of
-        Ok store ->
-            ( { model
-                | store = { store | live = Maybe.map Domain.restore store.live }
-                , importText = ""
-                , notice = Just ( True, "Импортировано." )
-              }
-            , Cmd.none
-            )
+validate : Form -> Result String (Exercise -> Exercise)
+validate f =
+    case ( String.trim f.name, String.toInt (String.trim f.bpm) ) of
+        ( "", _ ) ->
+            Err "Нужно название."
 
-        Err err ->
-            ( { model | notice = Just ( False, err ) }, Cmd.none )
+        ( _, Nothing ) ->
+            Err "Темп должен быть числом."
+
+        ( name, Just bpm ) ->
+            Ok
+                (\e ->
+                    { e
+                        | name = name
+                        , startBpm = Bpm.fromInt bpm
+                        , subdivision = f.subdivision
+                        , video =
+                            if String.trim f.video == "" then
+                                Nothing
+
+                            else
+                                Just (String.trim f.video)
+                    }
+                )
 
 
 act : Action -> Int -> Model -> ( Model, Cmd Msg )
-act action now model =
+act action now model0 =
+    let
+        model =
+            mapStore (Store.closeIfIdle now) model0
+    in
     case action of
         Tick ->
-            tick now model
-
-        StartPreset presetId ->
-            let
-                fresh =
-                    Domain.newLive now (Just presetId)
-
-                live =
-                    { fresh | plan = planFor now (Random.initialSeed now) model.store (Just presetId) }
-
-                first =
-                    List.head live.plan |> Maybe.andThen (.exerciseId >> findExercise model.store)
-            in
-            ( mapStore
-                (\s ->
-                    { s
-                        | live =
-                            Just
-                                (case first of
-                                    Just ex ->
-                                        Domain.startExercise now ex live
-
-                                    Nothing ->
-                                        live
-                                )
-                    }
-                )
-                model
-            , go model SessionRoute
-            )
-
-        StartQuick ->
-            ( mapStore (\s -> { s | live = Just (Domain.newLive now Nothing) }) model
-            , go model SessionRoute
-            )
-
-        SelectExercise exId ->
-            case findExercise model.store exId of
-                Just ex ->
-                    ( mapLive (Domain.startExercise now ex) { model | picker = False }, Cmd.none )
-
-                Nothing ->
-                    ( model, Cmd.none )
-
-        NextExercise ->
-            case model.store.live |> Maybe.andThen (nextInPreset now) of
-                Just exId ->
-                    act (SelectExercise exId) now model
-
-                Nothing ->
-                    ( model, Cmd.none )
-
-        Reroll idx ->
-            case model.store.live of
-                Just live ->
-                    case List.drop idx live.plan |> List.head of
-                        Just item ->
-                            if canReroll now model.store live idx item then
-                                let
-                                    plan =
-                                        Domain.reroll (playHistory now model.store) (Random.initialSeed now) model.store.exercises idx live.plan
-
-                                    picked =
-                                        List.drop idx plan |> List.head |> Maybe.andThen (.exerciseId >> findExercise model.store)
-
-                                    -- A pick still on screen (paused, untouched) is swapped too.
-                                    swap l =
-                                        case ( l.active, picked ) of
-                                            ( Just a, Just ex ) ->
-                                                if a.exerciseId == item.exerciseId then
-                                                    Domain.startExercise now ex l
-
-                                                else
-                                                    l
-
-                                            _ ->
-                                                l
-                                in
-                                ( mapLive (\l -> swap { l | plan = plan }) model, Cmd.none )
-
-                            else
-                                ( model, Cmd.none )
-
-                        Nothing ->
-                            ( model, Cmd.none )
-
-                Nothing ->
-                    ( model, Cmd.none )
+            ( mapStore (Store.tick now) model, Cmd.none )
 
         TogglePlay ->
-            ( mapActive
-                (\a ->
-                    if a.runningSince == Nothing then
-                        Domain.resume now a
+            ( mapStore (Store.togglePlay now) model, Cmd.none )
 
-                    else
-                        Domain.pause now a
-                )
-                model
-                |> mapLive (\l -> { l | heartbeat = now })
-            , Cmd.none
-            )
+        Bump delta ->
+            ( mapStore (Store.bump now delta) model, Cmd.none )
 
-        BumpBpm delta ->
-            ( mapActive (\a -> Domain.setBpm now (a.bpm + delta) a) model, Cmd.none )
+        Choose exerciseId ->
+            ( choose now exerciseId model, close model )
 
-        SetSubdivision n ->
-            ( mapActive (\a -> { a | subdivision = n }) model, Cmd.none )
+        SubmitSearch query ->
+            -- Done on the keyboard: open an exact match, add only when
+            -- nothing matches, otherwise leave the filtered list as is.
+            let
+                found =
+                    search query model.store.exercises
+            in
+            case ( found.exact, found.matches ) of
+                ( Just e, _ ) ->
+                    act (Choose (Just e.id)) now model
 
-        ToggleClick ->
-            ( mapActive (\a -> { a | metronomeOn = not a.metronomeOn }) model, Cmd.none )
+                ( Nothing, [] ) ->
+                    act (Create query) now model
 
-        FinishSession ->
-            finishLive now model
+                _ ->
+                    ( model, Cmd.none )
 
+        Create query ->
+            let
+                found =
+                    search query model.store.exercises
 
-tick : Int -> Model -> ( Model, Cmd Msg )
-tick now model =
-    case model.store.live of
-        Nothing ->
-            ( model, Cmd.none )
-
-        Just live ->
-            if Domain.isIdle now live then
-                finishLive now model
+                id =
+                    "e" ++ String.fromInt now
+            in
+            if found.query == "" || found.exact /= Nothing then
+                ( model, Cmd.none )
 
             else
-                let
-                    touched =
-                        if now - live.heartbeat >= 5000 then
-                            Domain.touch now live
-
-                        else
-                            live
-
-                    -- The active exercise, if it just reached its preset target.
-                    due =
-                        case ( touched.active, presetTarget touched ) of
-                            ( Just a, Just minutes ) ->
-                                if
-                                    not (List.member a.exerciseId touched.chimed)
-                                        && (Domain.exerciseTimeInLive now a.exerciseId touched >= minutes * 60000)
-                                then
-                                    Just a.exerciseId
-
-                                else
-                                    Nothing
-
-                            _ ->
-                                Nothing
-                in
-                case due of
-                    Just exerciseId ->
-                        ( mapStore (\s -> { s | live = Just { touched | chimed = exerciseId :: touched.chimed } }) model
-                        , chime model.store.settings.volume
+                ( model
+                    |> mapStore
+                        (\s ->
+                            Store.addExercise
+                                { id = id
+                                , name = String.trim query
+                                , startBpm = Session.bpm s.deck
+                                , subdivision = Store.subdivision s
+                                , video = Nothing
+                                }
+                                s
                         )
+                    |> choose now (Just id)
+                , close model
+                )
 
-                    Nothing ->
-                        ( mapStore (\s -> { s | live = Just touched }) model, Cmd.none )
+        Suggest ->
+            case model.page of
+                Pick state ->
+                    let
+                        played =
+                            Stats.lastPlayed (Store.allSegments now model.store)
+
+                        candidates =
+                            model.store.exercises
+                                |> List.filter (\e -> Just e.id /= Session.exerciseId model.store.deck && Just e.id /= state.suggested)
+                                |> List.sortBy (\e -> Dict.get e.id played |> Maybe.withDefault 0)
+                                |> List.take 3
+
+                        ( pick, _ ) =
+                            Random.step (Random.int 0 (List.length candidates - 1)) (Random.initialSeed now)
+                    in
+                    ( { model | page = Pick { state | suggested = candidates |> List.drop pick |> List.head |> Maybe.map .id } }
+                    , Cmd.none
+                    )
+
+                _ ->
+                    ( model, Cmd.none )
+
+        DeleteExercise id ->
+            ( mapStore (Store.deleteExercise now id) model, close model )
+
+        ApplyImport text ->
+            case Store.decodeImport text of
+                Ok imp ->
+                    let
+                        imported =
+                            model
+                                |> mapStore (Store.applyImport now imp)
+                                |> mapSettingsPage (\p -> { p | importText = "", message = Just (importMessage imp) })
+                    in
+                    case imp of
+                        Store.FullBackup _ ->
+                            -- A readable backup also lifts read-only mode.
+                            ( { imported | persistence = Persist, videoOpen = False }, Cmd.none )
+
+                        _ ->
+                            ( imported, Cmd.none )
+
+                Err _ ->
+                    ( mapSettingsPage (\p -> { p | message = Just "Не получилось разобрать JSON." }) model, Cmd.none )
 
 
-finishLive : Int -> Model -> ( Model, Cmd Msg )
-finishLive now model =
-    case model.store.live |> Maybe.andThen (Domain.finish now) of
-        Just session ->
-            ( mapStore (\s -> { s | live = Nothing, sessions = session :: s.sessions }) { model | confirmFinish = False }
-            , go model (Summary session.id)
-            )
+importMessage : Store.Import -> String
+importMessage imp =
+    case imp of
+        Store.FullBackup _ ->
+            "Резервная копия восстановлена."
 
-        Nothing ->
-            ( mapStore (\s -> { s | live = Nothing }) { model | confirmFinish = False }, go model Home )
+        Store.HistoryOnly _ ->
+            "История из старой версии добавлена."
 
-
-{-| Target minutes for the active exercise in the session's plan.
--}
-presetTarget : LiveSession -> Maybe Int
-presetTarget live =
-    live.active
-        |> Maybe.map
-            (\a ->
-                live.plan
-                    |> List.filter (\i -> i.exerciseId == a.exerciseId)
-                    |> List.map .minutes
-                    |> List.sum
-            )
-        |> Maybe.andThen
-            (\m ->
-                if m > 0 then
-                    Just m
-
-                else
-                    Nothing
-            )
+        Store.Exercises list ->
+            "Упражнений в файле: " ++ String.fromInt (List.length list) ++ "."
 
 
-{-| The next unfinished plan item after the current one (wrapping), or
-simply the next item when everything is done.
--}
-nextInPreset : Int -> LiveSession -> Maybe String
-nextInPreset now live =
+choose : Int -> Maybe String -> Model -> Model
+choose now exerciseId model =
     let
-        current =
-            live.active |> Maybe.map .exerciseId
-
-        idx =
-            live.plan
-                |> List.indexedMap Tuple.pair
-                |> List.filter (\( _, item ) -> Just item.exerciseId == current)
-                |> List.head
-                |> Maybe.map Tuple.first
-                |> Maybe.withDefault -1
-
-        rotated =
-            List.drop (idx + 1) live.plan ++ List.take (idx + 1) live.plan
-
-        candidates =
-            List.filter (\i -> Just i.exerciseId /= current) rotated
-
-        unfinished =
-            List.filter (\i -> Domain.exerciseTimeInLive now i.exerciseId live < i.minutes * 60000) candidates
+        switched =
+            mapStore (Store.switchTo now exerciseId) model
     in
-    List.head (unfinished ++ candidates) |> Maybe.map .exerciseId
-
-
-{-| Resolve a preset's slots for a new session.
--}
-planFor : Int -> Random.Seed -> Store -> Maybe String -> List PlanItem
-planFor now seed store presetId =
-    presetId
-        |> Maybe.andThen (findPreset store)
-        |> Maybe.map (.items >> Domain.buildPlan (playHistory now store) seed store.exercises)
-        |> Maybe.withDefault []
-
-
-playHistory : Int -> Store -> Domain.History
-playHistory now store =
-    { now = now, lastPlayed = Domain.lastPlayed store.sessions }
-
-
-{-| A random pick can be swapped until it has been played.
--}
-canReroll : Int -> Store -> LiveSession -> Int -> PlanItem -> Bool
-canReroll now store live idx item =
-    (Domain.exerciseTimeInLive now item.exerciseId live == 0)
-        && (live.active |> Maybe.map (\a -> a.exerciseId /= item.exerciseId || a.runningSince == Nothing) |> Maybe.withDefault True)
-        && not (List.isEmpty (Domain.rerollOptions store.exercises idx live.plan))
-
-
-{-| Preset form option values: "random:<generic id>" for a random choice.
--}
-itemKey : { a | exerciseId : String, random : Bool } -> String
-itemKey item =
-    if item.random then
-        "random:" ++ item.exerciseId
+    if Session.exerciseId switched.store.deck /= Session.exerciseId model.store.deck then
+        { switched | videoOpen = False }
 
     else
-        item.exerciseId
+        switched
 
 
-parseItemKey : String -> ( String, Bool )
-parseItemKey key =
-    if String.startsWith "random:" key then
-        ( String.dropLeft 7 key, True )
-
-    else
-        ( key, False )
+type alias Search =
+    { query : String
+    , exact : Maybe Exercise
+    , matches : List Exercise
+    }
 
 
-choiceLabel : Store -> { a | exerciseId : String, random : Bool } -> String
-choiceLabel store c =
-    if c.random then
-        "🎲 " ++ exerciseName store c.exerciseId
-
-    else
-        exerciseName store c.exerciseId
-
-
-slotLabel : Store -> PresetItem -> String
-slotLabel store item =
-    String.join " / " (List.map (choiceLabel store) item.choices)
-
-
-{-| A preset's length: one choice of each slot is played, so it's a range
-when choices differ in length.
+{-| Case-insensitive search by name, shared by the list and the keyboard's
+Done so they can't disagree.
 -}
-minutesRange : List (List Int) -> String
-minutesRange slots =
+search : String -> List Exercise -> Search
+search query exercises =
     let
-        lo =
-            slots |> List.filterMap List.minimum |> List.sum
-
-        hi =
-            slots |> List.filterMap List.maximum |> List.sum
+        q =
+            String.toLower (String.trim query)
     in
-    if lo == hi then
-        String.fromInt lo ++ " мин"
-
-    else
-        String.fromInt lo ++ "–" ++ String.fromInt hi ++ " мин"
-
-
-presetMinutes : Preset -> String
-presetMinutes preset =
-    minutesRange (List.map (.choices >> List.map .minutes) preset.items)
+    { query = q
+    , exact = List.filter (\e -> String.toLower e.name == q) exercises |> List.head
+    , matches = List.filter (\e -> String.contains q (String.toLower e.name)) exercises
+    }
 
 
 
@@ -1130,331 +727,39 @@ mapStore f model =
     { model | store = f model.store }
 
 
-mapLive : (LiveSession -> LiveSession) -> Model -> Model
-mapLive f =
-    mapStore (\s -> { s | live = Maybe.map f s.live })
+mapSettings : (Store.Settings -> Store.Settings) -> Model -> Model
+mapSettings f =
+    mapStore (\s -> { s | settings = f s.settings })
 
 
-mapActive : (Active -> Active) -> Model -> Model
-mapActive f =
-    mapLive (\l -> { l | active = Maybe.map f l.active })
-
-
-mapExForm : (ExerciseForm -> ExerciseForm) -> Model -> Model
-mapExForm f model =
-    case model.form of
-        ExForm form ->
-            { model | form = ExForm (f form), notice = Nothing }
+mapPick : (PickState -> PickState) -> Model -> Model
+mapPick f model =
+    case model.page of
+        Pick state ->
+            { model | page = Pick (f state) }
 
         _ ->
             model
 
 
-mapChoice : Int -> Int -> (FormChoice -> FormChoice) -> Model -> Model
-mapChoice i j f =
-    mapPrForm (\form -> { form | items = updateAt i (\sl -> { sl | choices = updateAt j f sl.choices }) form.items })
-
-
-mapPrForm : (PresetForm -> PresetForm) -> Model -> Model
-mapPrForm f model =
-    case model.form of
-        PrForm form ->
-            { model | form = PrForm (f form), notice = Nothing }
+mapForm : (Form -> Form) -> Model -> Model
+mapForm f model =
+    case model.page of
+        Edit state ->
+            { model | page = Edit { state | form = f state.form, error = Nothing } }
 
         _ ->
             model
 
 
-{-| A time-based id not yet used by any exercise or preset (`now` can lag
-by a tick, so two quick saves could otherwise collide).
--}
-freshId : String -> Model -> String
-freshId prefix model =
-    let
-        taken =
-            List.map .id model.store.exercises ++ List.map .id model.store.presets
-
-        try n =
-            let
-                id =
-                    prefix ++ String.fromInt (model.now + n)
-            in
-            if List.member id taken then
-                try (n + 1)
-
-            else
-                id
-    in
-    try 0
-
-
-findExercise : Store -> String -> Maybe Exercise
-findExercise store id =
-    List.filter (\e -> e.id == id) store.exercises |> List.head
-
-
-findPreset : Store -> String -> Maybe Preset
-findPreset store id =
-    List.filter (\p -> p.id == id) store.presets |> List.head
-
-
-{-| Non-archived exercises, each generic followed by its variants.
--}
-libraryOrder : Store -> List Exercise
-libraryOrder store =
-    Domain.grouped store.exercises
-        |> List.concatMap (\( top, variants ) -> top :: variants)
-        |> List.filter (not << .archived)
-
-
-exerciseName : Store -> String -> String
-exerciseName store id =
-    findExercise store id |> Maybe.map (Domain.displayName store.exercises) |> Maybe.withDefault "(удалено)"
-
-
-updateExercise : String -> (Exercise -> Exercise) -> List Exercise -> List Exercise
-updateExercise id f =
-    List.map
-        (\e ->
-            if e.id == id then
-                f e
-
-            else
-                e
-        )
-
-
-updateAt : Int -> (a -> a) -> List a -> List a
-updateAt i f =
-    List.indexedMap
-        (\j x ->
-            if i == j then
-                f x
-
-            else
-                x
-        )
-
-
-{-| Where the dragged slot lands: it passes a neighbour once it has moved
-over half of that neighbour (plus the list gap).
--}
-dropIndex : Drag -> Int
-dropIndex d =
-    let
-        dy =
-            d.y - d.startY
-
-        steps remaining hs n =
-            case hs of
-                h :: rest ->
-                    if remaining > (h + 8) / 2 then
-                        steps (remaining - h - 8) rest (n + 1)
-
-                    else
-                        n
-
-                [] ->
-                    n
-    in
-    if dy >= 0 then
-        d.from + steps dy (List.drop (d.from + 1) d.heights) 0
-
-    else
-        d.from - steps -dy (List.reverse (List.take d.from d.heights)) 0
-
-
-move : Int -> Int -> List a -> List a
-move from to xs =
-    if to < 0 || to >= List.length xs then
-        xs
-
-    else
-        case List.drop from xs |> List.head of
-            Just x ->
-                let
-                    without =
-                        List.take from xs ++ List.drop (from + 1) xs
-                in
-                List.take to without ++ [ x ] ++ List.drop to without
-
-            Nothing ->
-                xs
-
-
-pad2 : Int -> String
-pad2 n =
-    String.padLeft 2 '0' (String.fromInt n)
-
-
-{-| m:ss, or h:mm:ss past an hour.
--}
-clock : Int -> String
-clock ms =
-    let
-        total =
-            ms // 1000
-
-        h =
-            total // 3600
-
-        m =
-            modBy 60 (total // 60)
-
-        s =
-            modBy 60 total
-    in
-    if h > 0 then
-        String.fromInt h ++ ":" ++ pad2 m ++ ":" ++ pad2 s
-
-    else
-        String.fromInt m ++ ":" ++ pad2 s
-
-
-{-| "1 ч 05 мин" / "23 мин".
--}
-duration : Int -> String
-duration ms =
-    let
-        mins =
-            ms // 60000
-    in
-    if mins >= 60 then
-        String.fromInt (mins // 60) ++ " ч " ++ pad2 (modBy 60 mins) ++ " мин"
-
-    else
-        String.fromInt mins ++ " мин"
-
-
-{-| Russian plural form for `n`: one (1, 21), few (2–4, 22–24), many.
--}
-plural : Int -> String -> String -> String -> String
-plural n one few many =
-    let
-        mod10 =
-            modBy 10 n
-
-        mod100 =
-            modBy 100 n
-    in
-    if mod10 == 1 && mod100 /= 11 then
-        one
-
-    else if mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14) then
-        few
-
-    else
-        many
-
-
-dateLabel : Time.Zone -> Int -> String
-dateLabel zone millis =
-    let
-        t =
-            Time.millisToPosix millis
-
-        weekday =
-            case Time.toWeekday zone t of
-                Time.Mon ->
-                    "Пн"
-
-                Time.Tue ->
-                    "Вт"
-
-                Time.Wed ->
-                    "Ср"
-
-                Time.Thu ->
-                    "Чт"
-
-                Time.Fri ->
-                    "Пт"
-
-                Time.Sat ->
-                    "Сб"
-
-                Time.Sun ->
-                    "Вс"
-
-        month =
-            case Time.toMonth zone t of
-                Time.Jan ->
-                    "янв"
-
-                Time.Feb ->
-                    "фев"
-
-                Time.Mar ->
-                    "мар"
-
-                Time.Apr ->
-                    "апр"
-
-                Time.May ->
-                    "мая"
-
-                Time.Jun ->
-                    "июн"
-
-                Time.Jul ->
-                    "июл"
-
-                Time.Aug ->
-                    "авг"
-
-                Time.Sep ->
-                    "сен"
-
-                Time.Oct ->
-                    "окт"
-
-                Time.Nov ->
-                    "ноя"
-
-                Time.Dec ->
-                    "дек"
-    in
-    weekday
-        ++ " "
-        ++ String.fromInt (Time.toDay zone t)
-        ++ " "
-        ++ month
-        ++ ", "
-        ++ pad2 (Time.toHour zone t)
-        ++ ":"
-        ++ pad2 (Time.toMinute zone t)
-
-
-subdivisionLabel : Int -> String
-subdivisionLabel n =
-    case n of
-        2 ->
-            "восьмые"
-
-        3 ->
-            "триоли"
-
-        4 ->
-            "шестнадцатые"
+mapSettingsPage : (SettingsState -> SettingsState) -> Model -> Model
+mapSettingsPage f model =
+    case model.page of
+        Settings state ->
+            { model | page = Settings (f state) }
 
         _ ->
-            "четверти"
-
-
-subdivisionIcon : Int -> String
-subdivisionIcon n =
-    case n of
-        2 ->
-            "♫"
-
-        3 ->
-            "3"
-
-        4 ->
-            "♬"
-
-        _ ->
-            "♩"
+            model
 
 
 
@@ -1463,1179 +768,542 @@ subdivisionIcon n =
 
 view : Model -> Browser.Document Msg
 view model =
-    { title = "Гитара: тренировки"
+    { title = "Гитара"
     , body =
         [ div [ class "app" ]
-            [ main_ [ class "page" ] (viewPage model)
-            , viewNav model
+            [ viewHome model
+            , case model.page of
+                Home ->
+                    text ""
+
+                Pick state ->
+                    sheet "Что играешь?" (viewPicker model state)
+
+                Edit state ->
+                    sheet "Упражнение" (viewEdit state)
+
+                EditMissing ->
+                    sheet "Упражнение" [ p [ class "muted" ] [ text "Упражнение не найдено." ] ]
+
+                Stats ->
+                    sheet "Статистика" (viewStats model)
+
+                Settings state ->
+                    sheet "Настройки" (viewSettings model state)
             ]
         ]
     }
 
 
-viewNav : Model -> Html Msg
-viewNav model =
-    let
-        item route label icon =
-            a
-                [ href (routeHref route)
-                , classList [ ( "active", sameSection model.route route ) ]
-                ]
-                [ span [ class "nav-icon" ] [ text icon ], span [] [ text label ] ]
-
-        practice =
-            if model.store.live /= Nothing then
-                item SessionRoute "Сессия" "●"
-
-            else
-                item Home "Тренировка" "▶"
-    in
-    nav [ class "nav" ]
-        [ practice
-        , item Library "Библиотека" "☰"
-        , item Stats "Статистика" "▤"
-        , item Settings "Настройки" "⚙"
+sheet : String -> List (Html Msg) -> Html Msg
+sheet title content =
+    div [ class "sheet" ]
+        [ div [ class "sheet-head" ]
+            [ h1 [] [ text title ]
+            , button [ class "icon-btn", onClick Close, attribute "aria-label" "Закрыть" ] [ icon Cross ]
+            ]
+        , div [ class "sheet-body" ] content
         ]
 
 
-sameSection : Route -> Route -> Bool
-sameSection current target =
-    case ( current, target ) of
-        ( EditExercise _, Library ) ->
-            True
-
-        ( NewVariant _, Library ) ->
-            True
-
-        ( EditPreset _, Library ) ->
-            True
-
-        ( Summary _, Stats ) ->
-            True
-
-        ( SessionRoute, Home ) ->
-            True
-
-        ( Home, SessionRoute ) ->
-            True
-
-        _ ->
-            current == target
-
-
-viewPage : Model -> List (Html Msg)
-viewPage model =
-    case model.route of
-        Home ->
-            viewHome model
-
-        SessionRoute ->
-            case model.store.live of
-                Just live ->
-                    viewSession model live
-
-                Nothing ->
-                    viewHome model
-
-        Summary id ->
-            case List.filter (\s -> s.id == id) model.store.sessions |> List.head of
-                Just session ->
-                    viewSummary model session
-
-                Nothing ->
-                    [ h1 [] [ text "Сессия не найдена" ], a [ class "btn", href (routeHref Home) ] [ text "На главную" ] ]
-
-        Library ->
-            viewLibrary model
-
-        EditExercise _ ->
-            case model.form of
-                ExForm f ->
-                    viewExerciseForm model f
-
-                _ ->
-                    []
-
-        NewVariant _ ->
-            case model.form of
-                ExForm f ->
-                    viewExerciseForm model f
-
-                _ ->
-                    []
-
-        EditPreset _ ->
-            case model.form of
-                PrForm f ->
-                    viewPresetForm model f
-
-                _ ->
-                    []
-
-        Stats ->
-            viewStats model
-
-        Settings ->
-            viewSettings model
-
-
-
--- VIEW: HOME
-
-
-viewHome : Model -> List (Html Msg)
+viewHome : Model -> Html Msg
 viewHome model =
     let
         store =
             model.store
 
-        byDay =
-            Domain.minutesByDay model.zone store.sessions
+        deck =
+            store.deck
 
-        today =
-            Dict.get (Domain.dayKey model.zone model.now) byDay |> Maybe.withDefault 0
+        bpm =
+            Bpm.toInt (Session.bpm deck)
 
-        week =
-            lastDays model 7 |> List.map Tuple.second |> List.sum
-
-        streak =
-            Domain.streak model.zone model.now store.sessions
-    in
-    [ h1 [] [ text "Тренировка" ]
-    , div [ class "tiles" ]
-        [ tile "Сегодня" (duration today)
-        , tile "7 дней" (duration week)
-        , tile "Серия" (String.fromInt streak ++ " " ++ plural streak "день" "дня" "дней")
-        ]
-    , case store.live of
-        Just live ->
-            a [ class "card resume", href (routeHref SessionRoute) ]
-                [ div [ class "card-title" ] [ text "Продолжить сессию" ]
-                , div [ class "muted" ] [ text (clock (Domain.liveTotal model.now live) ++ " практики") ]
-                ]
-
-        Nothing ->
-            div [ class "stack" ]
-                [ h2 [] [ text "Пресеты" ]
-                , if List.isEmpty store.presets then
-                    p [ class "muted" ]
-                        [ text "Пресетов пока нет. "
-                        , a [ href (routeHref (EditPreset Nothing)) ] [ text "Создать" ]
-                        , text "."
-                        ]
-
-                  else
-                    div [ class "list" ]
-                        (List.map
-                            (\preset ->
-                                button [ class "card preset", onClick (Act (StartPreset preset.id)) ]
-                                    [ div [ class "card-title" ] [ text preset.name ]
-                                    , div [ class "muted" ]
-                                        [ text
-                                            (presetMinutes preset
-                                                ++ " · "
-                                                ++ String.join ", " (List.map (slotLabel store) preset.items)
-                                            )
-                                        ]
-                                    ]
-                            )
-                            store.presets
-                        )
-                , button [ class "btn big secondary", onClick (Act StartQuick) ] [ text "Быстрая сессия" ]
-                ]
-    ]
-
-
-tile : String -> String -> Html msg
-tile label value =
-    div [ class "tile" ] [ div [ class "tile-value" ] [ text value ], div [ class "tile-label" ] [ text label ] ]
-
-
-
--- VIEW: SESSION
-
-
-viewSession : Model -> LiveSession -> List (Html Msg)
-viewSession model live =
-    let
-        store =
-            model.store
-
-        preset =
-            live.presetId |> Maybe.andThen (findPreset store)
-    in
-    [ div [ class "session-head" ]
-        [ div []
-            [ div [ class "muted small" ] [ text (preset |> Maybe.map .name |> Maybe.withDefault "Быстрая сессия") ]
-            , div [ class "session-total" ] [ text (clock (Domain.liveTotal model.now live)) ]
-            ]
-        , button [ class "btn secondary", onClick (AskFinish True) ] [ text "Завершить" ]
-        ]
-    , if model.confirmFinish then
-        div [ class "card confirm" ]
-            [ p [] [ text "Завершить сессию?" ]
-            , div [ class "row" ]
-                [ button [ class "btn", onClick (Act FinishSession) ] [ text "Сохранить и завершить" ]
-                , button [ class "btn secondary", onClick (AskFinish False) ] [ text "Продолжить" ]
-                ]
-            , button [ class "link danger", onClick DiscardSession ] [ text "Удалить сессию" ]
-            ]
-
-      else
-        text ""
-    , case live.active of
-        Just a ->
-            viewActive model live a
-
-        Nothing ->
-            p [ class "muted" ] [ text "Выберите упражнение." ]
-    , if List.isEmpty live.plan then
-        text ""
-
-      else
-        viewQueue model live
-    , button [ class "btn secondary wide", onClick TogglePicker ]
-        [ text
-            (if model.picker then
-                "Скрыть упражнения"
-
-             else
-                "Сменить упражнение…"
-            )
-        ]
-    , if model.picker then
-        div [ class "list" ]
-            (libraryOrder store
-                |> List.map
-                    (\ex ->
-                        button
-                            [ classList [ ( "row-btn", True ), ( "current", Maybe.map .exerciseId live.active == Just ex.id ) ]
-                            , onClick (Act (SelectExercise ex.id))
-                            ]
-                            [ span [] [ text (Domain.displayName store.exercises ex) ]
-                            , span [ class "muted" ] [ text (exerciseTimeLabel model live ex.id) ]
-                            ]
-                    )
-            )
-
-      else
-        text ""
-    ]
-
-
-exerciseTimeLabel : Model -> LiveSession -> String -> String
-exerciseTimeLabel model live exId =
-    let
-        t =
-            Domain.exerciseTimeInLive model.now exId live
-    in
-    if t > 0 then
-        clock t
-
-    else
-        ""
-
-
-viewActive : Model -> LiveSession -> Active -> Html Msg
-viewActive model live a =
-    let
         ex =
-            findExercise model.store a.exerciseId
+            Store.currentExercise store
 
-        spent =
-            Domain.exerciseTimeInLive model.now a.exerciseId live
+        video =
+            ex |> Maybe.andThen .video
 
-        target =
-            presetTarget live
+        videoId =
+            video |> Maybe.andThen Exercise.youtubeId
 
-        running =
-            a.runningSince /= Nothing
+        showVideo =
+            model.videoOpen && videoId /= Nothing
 
         countIn =
-            Domain.countInRemaining model.now a
+            store.live |> Maybe.map (Session.countInRemaining model.now) |> Maybe.withDefault 0
 
-        lastTop =
-            Domain.lastTopBpm a.exerciseId model.store.sessions
+        running =
+            Store.isRunning store
 
-        over =
-            target |> Maybe.map (\m -> spent >= m * 60000) |> Maybe.withDefault False
+        ( ringState, hint ) =
+            if not running then
+                ( "off", "тап — старт" )
 
-        bpmBtn delta =
-            button [ class "btn bpm-btn", onClick (Act (BumpBpm delta)) ]
-                [ text
-                    (if delta > 0 then
-                        "+" ++ String.fromInt delta
+            else if countIn > 0 then
+                ( "on", "отсчёт · " ++ String.fromInt ((countIn * bpm + 59999) // 60000) )
 
-                     else
-                        "−" ++ String.fromInt (abs delta)
-                    )
-                ]
+            else if Session.clickOn deck then
+                ( "on", "тап — пауза" )
+
+            else
+                ( "on silent", "тап — пауза" )
+
+        timer f =
+            store.live |> Maybe.map (f model.now deck) |> Maybe.withDefault 0
+
+        subdivision =
+            Store.subdivision store
     in
-    div [ class "card active-card" ]
-        [ div [ class "ex-name" ] [ text (exerciseName model.store a.exerciseId) ]
-        , case ex |> Maybe.map .notes |> Maybe.withDefault "" of
-            "" ->
-                text ""
-
-            notes ->
-                div [ class "ex-notes" ] [ text notes ]
-        , div [ classList [ ( "ex-time", True ), ( "over", over ) ] ]
-            [ text (clock spent)
-            , case target of
-                Just m ->
-                    span [ class "muted" ] [ text (" / " ++ String.fromInt m ++ ":00") ]
-
-                Nothing ->
-                    text ""
+    main_
+        [ classList [ ( "home", True ), ( "with-video", showVideo ) ] ]
+        [ div [ class "topbar" ]
+            [ a [ class "icon-btn", href (routeHref StatsRoute), attribute "aria-label" "Статистика" ] [ icon Chart ]
+            , a [ class "icon-btn", href (routeHref SettingsRoute), attribute "aria-label" "Настройки" ] [ icon Gear ]
             ]
-        , case target of
-            Just m ->
-                div [ class "progress" ]
-                    [ div
-                        [ class "progress-fill"
-                        , style "width" (String.fromFloat (min 100 (toFloat spent / toFloat (m * 600))) ++ "%")
-                        ]
-                        []
-                    ]
-
-            Nothing ->
-                text ""
-        , div [ class "bpm-row" ]
-            [ bpmBtn -5
-            , bpmBtn -1
-            , div [ class "bpm" ]
-                [ div [ class "bpm-value" ] [ text (String.fromInt a.bpm) ]
-                , div [ class "bpm-label" ] [ text "BPM" ]
+        , viewBanner model
+        , div [ class "pill" ]
+            [ a [ class "pill-main", href (routeHref PickRoute) ]
+                [ span [ class "pill-name" ] [ text (ex |> Maybe.map .name |> Maybe.withDefault "Без упражнения") ]
+                , small [] [ text "сменить ⌄" ]
                 ]
-            , bpmBtn 1
-            , bpmBtn 5
-            ]
-        , div [ class "bpm-meta muted small" ]
-            [ text
-                ("старт "
-                    ++ String.fromInt a.startBpm
-                    ++ (if a.maxBpm > 0 then
-                            " · макс сейчас " ++ String.fromInt a.maxBpm
-
-                        else
-                            ""
-                       )
-                    ++ (lastTop |> Maybe.map (\b -> " · прошлый макс " ++ String.fromInt b) |> Maybe.withDefault "")
-                )
-            ]
-        , div [ class "seg" ]
-            (List.map
-                (\n ->
-                    button
-                        [ classList [ ( "seg-btn", True ), ( "on", a.subdivision == n ) ]
-                        , onClick (Act (SetSubdivision n))
-                        , title (subdivisionLabel n)
-                        ]
-                        [ text (subdivisionIcon n) ]
-                )
-                [ 1, 2, 3, 4 ]
-                ++ [ button
-                        [ classList [ ( "seg-btn", True ), ( "on", a.metronomeOn ) ]
-                        , onClick (Act ToggleClick)
-                        ]
+            , case ( video, videoId ) of
+                ( _, Just _ ) ->
+                    button [ class "pill-side", onClick ToggleVideo ]
                         [ text
-                            (if a.metronomeOn then
-                                "клик вкл"
+                            (if showVideo then
+                                "скрыть"
 
                              else
-                                "клик выкл"
+                                "▶ видео"
                             )
                         ]
-                   ]
-            )
-        , button
-            [ classList [ ( "btn play", True ), ( "running", running ) ]
-            , onClick (Act TogglePlay)
+
+                ( Just link, Nothing ) ->
+                    a [ class "pill-side", href link, target "_blank", rel "noopener" ] [ text "видео ↗" ]
+
+                ( Nothing, Nothing ) ->
+                    text ""
             ]
-            [ text
-                (if countIn > 0 then
-                    "отсчёт… " ++ String.fromInt (ceiling (toFloat countIn * toFloat a.bpm / 60000))
+        , Html.Keyed.node "div"
+            [ class "video-slot" ]
+            [ case ( showVideo, videoId, video ) of
+                ( True, Just vid, Just link ) ->
+                    ( vid
+                    , div [ class "video" ]
+                        [ iframe
+                            [ src ("https://www.youtube-nocookie.com/embed/" ++ vid ++ "?playsinline=1&rel=0")
+                            , attribute "allow" "autoplay; encrypted-media; picture-in-picture; fullscreen"
+                            , attribute "frameborder" "0"
+                            , title "Видео"
+                            ]
+                            []
+                        , a [ class "video-out", href link, target "_blank", rel "noopener" ] [ text "открыть в YouTube ↗" ]
+                        ]
+                    )
 
-                 else if running then
-                    "❚❚ Пауза"
+                _ ->
+                    ( "none", text "" )
+            ]
+        , button [ class ("ring " ++ ringState), onClick (Act TogglePlay), attribute "aria-label" hint ]
+            -- `.arc` and `.subs i` are animated from main.ts; Elm never styles them.
+            [ span [ class "arc" ] []
+            , span [ class "bpm" ] [ text (String.fromInt bpm) ]
+            , span [ class "hint" ] [ text hint ]
+            , if Exercise.perBeat subdivision > 1 then
+                span [ class "subs" ] (List.repeat (Exercise.perBeat subdivision) (i [] []))
 
-                 else
-                    "▶ Играть"
-                )
+              else
+                text ""
+            ]
+        , div [ class "chips" ]
+            (case ex of
+                Just e ->
+                    [ if e.startBpm /= Session.bpm deck then
+                        button [ class "chip", onClick MakeStart ]
+                            [ text ("старт " ++ String.fromInt (Bpm.toInt e.startBpm) ++ " · ")
+                            , b [] [ text ("сделать " ++ String.fromInt bpm) ]
+                            ]
+
+                      else
+                        span [ class "chip quiet" ] [ text ("старт " ++ String.fromInt bpm) ]
+                    ]
+
+                Nothing ->
+                    []
+            )
+        , div [ class "keys" ]
+            (List.map
+                (\( delta, label ) -> button [ class "key", onClick (Act (Bump delta)) ] [ text label ])
+                [ ( -5, "−5" ), ( -1, "−1" ), ( 1, "+1" ), ( 5, "+5" ) ]
+            )
+        , div [ class "chips" ]
+            [ button [ class "chip", onClick CycleSubdivision ] [ text (Format.subdivision subdivision) ]
+            , button [ classList [ ( "chip", True ), ( "dim", not (Session.clickOn deck) ) ], onClick ToggleClick ]
+                [ text
+                    (if Session.clickOn deck then
+                        "клик вкл"
+
+                     else
+                        "клик выкл"
+                    )
+                ]
+            ]
+        , div [ class "timers" ]
+            [ div [] [ b [] [ text (Format.clock (timer Session.exerciseTime)) ], text "на упражнении" ]
+            , div [] [ b [] [ text (Format.clock (timer Session.total)) ], text "всего" ]
             ]
         ]
 
 
-viewQueue : Model -> LiveSession -> Html Msg
-viewQueue model live =
+viewBanner : Model -> Html msg
+viewBanner model =
+    case ( model.persistence, model.startupNotice ) of
+        ( ReadOnly, _ ) ->
+            p [ class "notice" ] [ text "Не удалось прочитать сохранённые данные. Они не тронуты, но изменения сейчас не сохраняются. Восстанови резервную копию в настройках." ]
+
+        ( Persist, Just notice ) ->
+            p [ class "notice" ] [ text notice ]
+
+        ( Persist, Nothing ) ->
+            text ""
+
+
+viewPicker : Model -> PickState -> List (Html Msg)
+viewPicker model state =
     let
+        found =
+            search state.query model.store.exercises
+
+        played =
+            Stats.lastPlayed (Store.allSegments model.now model.store)
+
         current =
-            live.active |> Maybe.map .exerciseId
+            Session.exerciseId model.store.deck
 
-        currentDone =
-            case ( live.active, presetTarget live ) of
-                ( Just a, Just m ) ->
-                    Domain.exerciseTimeInLive model.now a.exerciseId live >= m * 60000
-
-                _ ->
-                    False
-    in
-    div [ class "queue" ]
-        [ div [ class "list" ]
-            (List.indexedMap
-                (\idx item ->
-                    let
-                        spent =
-                            Domain.exerciseTimeInLive model.now item.exerciseId live
-
-                        done =
-                            spent >= item.minutes * 60000
-
-                        rerollable =
-                            canReroll model.now model.store live idx item
-                    in
-                    div [ class "queue-row" ]
-                        [ button
-                            [ classList [ ( "row-btn", True ), ( "current", current == Just item.exerciseId ), ( "done", done ) ]
-                            , onClick (Act (SelectExercise item.exerciseId))
-                            ]
-                            [ span []
-                                [ text
-                                    ((if done then
-                                        "✓ "
-
-                                      else
-                                        ""
-                                     )
-                                        ++ exerciseName model.store item.exerciseId
-                                    )
-
-                                -- Without a reroll button, still show the pick was random.
-                                , if (List.length item.choices > 1 || List.any .random item.choices) && not rerollable then
-                                    span [ class "random-mark", title "Случайный вариант" ] [ text "🎲" ]
-
-                                  else
-                                    text ""
-                                ]
-                            , span [ class "muted" ] [ text (clock spent ++ " / " ++ String.fromInt item.minutes ++ " мин") ]
-                            ]
-                        , if rerollable then
-                            button [ class "icon-btn reroll", title "Другой вариант", onClick (Act (Reroll idx)) ] [ text "🎲" ]
+        row e =
+            div [ classList [ ( "row", True ), ( "current", current == Just e.id ) ] ]
+                [ button [ class "row-main", onClick (Act (Choose (Just e.id))) ]
+                    [ span [ class "row-name" ]
+                        [ text e.name
+                        , if e.video /= Nothing then
+                            span [ class "tag" ] [ text "▶" ]
 
                           else
                             text ""
                         ]
-                )
-                live.plan
-            )
-        , button
-            [ classList [ ( "btn big next", True ), ( "glow", currentDone ) ]
-            , onClick (Act NextExercise)
-            ]
-            [ text "Далее ▸" ]
-        ]
-
-
-
--- VIEW: SUMMARY
-
-
-viewSummary : Model -> Session -> List (Html Msg)
-viewSummary model session =
-    let
-        tops =
-            Domain.topBpmsInSession session
-
-        exerciseIds =
-            session.segments
-                |> List.map .exerciseId
-                |> List.foldl
-                    (\id acc ->
-                        if List.member id acc then
-                            acc
-
-                        else
-                            acc ++ [ id ]
-                    )
-                    []
-
-        timeOn id =
-            session.segments |> List.filter (\s -> s.exerciseId == id) |> List.map .durationMs |> List.sum
-    in
-    [ h1 [] [ text "Сессия" ]
-    , p [ class "muted" ] [ text (dateLabel model.zone session.startedAt) ]
-    , div [ class "tiles" ] [ tile "Время" (clock (Domain.sessionTotal session)) ]
-    , div [ class "list" ]
-        (List.map
-            (\id ->
-                let
-                    top =
-                        Dict.get id tops |> Maybe.withDefault 0
-
-                    ex =
-                        findExercise model.store id
-                in
-                div [ class "card" ]
-                    [ div [ class "row spread" ]
-                        [ div [ class "card-title" ] [ text (exerciseName model.store id) ]
-                        , div [] [ text (clock (timeOn id)) ]
+                    , small []
+                        [ text
+                            (Dict.get e.id played
+                                |> Maybe.map (Format.ago model.zone model.now)
+                                |> Maybe.withDefault "ещё не играл"
+                            )
                         ]
-                    , if top > 0 && (Maybe.map .metronome ex |> Maybe.withDefault True) then
-                        div [ class "muted" ] [ text ("макс " ++ String.fromInt top ++ " BPM") ]
-
-                      else
-                        text ""
-                    , case ex of
-                        Just e ->
-                            if e.metronome && top > e.startBpm then
-                                button [ class "btn small", onClick (PromoteBpm id top) ]
-                                    [ text ("Сделать " ++ String.fromInt top ++ " стартовым BPM (сейчас " ++ String.fromInt e.startBpm ++ ")") ]
-
-                            else if top == e.startBpm && top > 0 then
-                                div [ class "muted small" ] [ text ("Стартовый BPM: " ++ String.fromInt e.startBpm) ]
-
-                            else
-                                text ""
-
-                        Nothing ->
-                            text ""
                     ]
-            )
-            exerciseIds
-        )
-    , a [ class "btn big", href (routeHref Home) ] [ text "Готово" ]
-    , if model.confirmDelete then
-        div [ class "row" ]
-            [ button [ class "btn danger", onClick (DeleteSession session.id) ] [ text "Удалить навсегда" ]
-            , button [ class "btn secondary", onClick (AskDelete False) ] [ text "Отмена" ]
+                , div [ class "stepper" ]
+                    [ button [ onClick (StartBump e.id -5), attribute "aria-label" "старт −5" ] [ text "−" ]
+                    , span [] [ text (String.fromInt (Bpm.toInt e.startBpm)) ]
+                    , button [ onClick (StartBump e.id 5), attribute "aria-label" "старт +5" ] [ text "+" ]
+                    ]
+                , a [ class "icon-btn small", href (routeHref (EditRoute e.id)), attribute "aria-label" "Изменить" ] [ icon Pencil ]
+                ]
+
+        byRecency =
+            List.sortBy (\e -> Dict.get e.id played |> Maybe.withDefault 0 |> negate) found.matches
+    in
+    [ Html.form [ class "search", onSubmit (Act (SubmitSearch state.query)) ]
+        [ input
+            [ type_ "text"
+            , placeholder "найти или добавить…"
+            , value state.query
+            , onInput QueryChanged
+            , attribute "enterkeyhint" "done"
             ]
+            []
+        ]
+    , if found.query /= "" && found.exact == Nothing then
+        button [ class "add", onClick (Act (Create state.query)) ] [ text ("+ добавить «" ++ String.trim state.query ++ "»") ]
 
       else
-        button [ class "link danger", onClick (AskDelete True) ] [ text "Удалить эту сессию" ]
-    ]
-
-
-
--- VIEW: LIBRARY
-
-
-viewLibrary : Model -> List (Html Msg)
-viewLibrary model =
-    let
-        archived =
-            List.filter .archived model.store.exercises
-    in
-    [ h1 [] [ text "Библиотека" ]
-    , h2 [] [ text "Пресеты" ]
-    , div [ class "list" ]
-        (List.map
-            (\pr ->
-                a [ class "row-btn", href (routeHref (EditPreset (Just pr.id))) ]
-                    [ span [] [ text pr.name ]
-                    , span [ class "muted" ] [ text (presetMinutes pr) ]
-                    ]
-            )
-            model.store.presets
-        )
-    , a [ class "btn secondary wide", href (routeHref (EditPreset Nothing)) ] [ text "+ Новый пресет" ]
-    , h2 [] [ text "Упражнения" ]
-    , div [ class "list" ]
-        (libraryOrder model.store
-            |> List.map
-                (\ex ->
-                    a
-                        [ classList [ ( "row-btn", True ), ( "variant", ex.parentId /= Nothing ) ]
-                        , href (routeHref (EditExercise (Just ex.id)))
-                        ]
-                        [ span [] [ text ex.name ]
-                        , span [ class "muted" ]
-                            [ text
-                                (if ex.metronome then
-                                    String.fromInt ex.startBpm ++ " BPM " ++ subdivisionIcon ex.subdivision
-
-                                 else
-                                    "без клика"
-                                )
-                            ]
-                        ]
-                )
-        )
-    , a [ class "btn secondary wide", href (routeHref (EditExercise Nothing)) ] [ text "+ Новое упражнение" ]
-    , if List.isEmpty archived then
         text ""
+    , case state.suggested |> Maybe.andThen (Store.findExercise model.store) of
+        Just e ->
+            div [ class "suggestion" ] [ small [] [ text "может, это?" ], row e ]
 
-      else
-        details []
-            [ summary [ class "muted" ] [ text ("Архив (" ++ String.fromInt (List.length archived) ++ ")") ]
-            , div [ class "list" ]
-                (List.map
-                    (\ex ->
-                        div [ class "row-btn" ]
-                            [ span [] [ text (Domain.displayName model.store.exercises ex) ]
-                            , button [ class "link", onClick (RestoreExercise ex.id) ] [ text "Вернуть" ]
-                            ]
-                    )
-                    archived
-                )
+        Nothing ->
+            text ""
+    , div [ class "list" ]
+        ((if found.query == "" then
+            [ div [ classList [ ( "row", True ), ( "current", current == Nothing ) ] ]
+                [ button [ class "row-main", onClick (Act (Choose Nothing)) ]
+                    [ span [ class "row-name" ] [ text "Без упражнения" ]
+                    , small [] [ text "просто поиграть" ]
+                    ]
+                ]
             ]
-    ]
-
-
-viewNotice : Model -> Html msg
-viewNotice model =
-    case model.notice of
-        Just ( ok, message ) ->
-            div [ classList [ ( "notice", True ), ( "error", not ok ) ] ] [ text message ]
-
-        Nothing ->
-            text ""
-
-
-viewExerciseForm : Model -> ExerciseForm -> List (Html Msg)
-viewExerciseForm model f =
-    let
-        parentName =
-            f.parentId |> Maybe.map (exerciseName model.store)
-    in
-    [ h1 []
-        [ text
-            (case ( f.id, parentName ) of
-                ( Nothing, Just _ ) ->
-                    "Новый вариант"
-
-                ( Nothing, Nothing ) ->
-                    "Новое упражнение"
-
-                ( Just _, Just _ ) ->
-                    "Вариант"
-
-                ( Just _, Nothing ) ->
-                    "Упражнение"
-            )
-        ]
-    , case parentName of
-        Just name ->
-            p [ class "muted" ] [ text ("Вариант упражнения «" ++ name ++ "»") ]
-
-        Nothing ->
-            text ""
-    , label [ class "field" ]
-        [ span [] [ text "Название" ]
-        , input [ value f.name, onInput ExName, placeholder "Свип-арпеджио, ля минор" ] []
-        ]
-    , label [ class "field" ]
-        [ span [] [ text "Стартовый BPM" ]
-        , input [ type_ "number", attribute "inputmode" "numeric", value f.bpm, onInput ExBpm ] []
-        ]
-    , div [ class "field" ]
-        [ span [] [ text "Кликов на долю" ]
-        , div [ class "seg" ]
-            (List.map
-                (\n ->
-                    button
-                        [ classList [ ( "seg-btn", True ), ( "on", f.subdivision == n ) ]
-                        , onClick (ExSubdivision n)
-                        ]
-                        [ text (subdivisionIcon n ++ " " ++ subdivisionLabel n) ]
-                )
-                [ 1, 2, 3, 4 ]
-            )
-        ]
-    , label [ class "field check" ]
-        [ input [ type_ "checkbox", checked f.metronome, onCheck ExMetronome ] []
-        , span [] [ text "Метроном включён по умолчанию" ]
-        ]
-    , label [ class "field" ]
-        [ span [] [ text "Заметки" ]
-        , textarea [ value f.notes, onInput ExNotes, rows 3, placeholder "Ссылка на табы, на чём сосредоточиться…" ] []
-        ]
-    , viewNotice model
-    , button [ class "btn big", onClick SaveExercise ] [ text "Сохранить" ]
-    , case f.id of
-        Just id ->
-            a [ class "btn secondary wide", href (routeHref (NewVariant id)) ] [ text "Клонировать в вариант" ]
-
-        Nothing ->
-            text ""
-    , case f.id of
-        Just id ->
-            button [ class "link danger", onClick (DeleteExercise id) ] [ text "Удалить упражнение" ]
-
-        Nothing ->
-            text ""
-    ]
-
-
-viewPresetForm : Model -> PresetForm -> List (Html Msg)
-viewPresetForm model f =
-    let
-        exercises =
-            libraryOrder model.store
-
-        -- Exercises fixed by a slot elsewhere can't be offered again.
-        fixedIn slots =
-            List.filterMap Domain.fixedExercise slots
-
-        randomChoices =
-            exercises
-                |> List.filter (\ex -> ex.parentId == Nothing)
-                |> List.map (\ex -> ( "random:" ++ ex.id, "🎲 " ++ ex.name ))
-
-        fixedChoices taken =
-            exercises
-                |> List.filter (\ex -> not (List.member ex.id taken))
-                |> List.map (\ex -> ( ex.id, Domain.displayName model.store.exercises ex ))
-
-        -- A choice offers what neither its slot's other choices nor fixed
-        -- slots elsewhere use; plus its own value, even if archived meanwhile.
-        exerciseOptions i j choice =
-            let
-                key =
-                    itemKey choice
-
-                slot =
-                    List.drop i f.items |> List.head |> Maybe.map .choices |> Maybe.withDefault []
-
-                siblings =
-                    List.take j slot ++ List.drop (j + 1) slot |> List.map itemKey
-
-                others =
-                    fixedIn (List.take i f.items ++ List.drop (i + 1) f.items)
-
-                offered =
-                    (fixedChoices others ++ randomChoices)
-                        |> List.filter (\( k, _ ) -> not (List.member k siblings))
-
-                own =
-                    if List.any (\( k, _ ) -> k == key) offered then
-                        []
-
-                    else
-                        [ ( key, choiceLabel model.store choice ) ]
-            in
-            (own ++ offered)
-                |> List.map (\( k, label ) -> option [ value k, Html.Attributes.selected (k == key) ] [ text label ])
-
-        addable =
-            fixedChoices (fixedIn f.items)
-
-        pickRow ( key, label ) =
-            button [ class "row-btn", onClick (PrAddItem key) ] [ span [] [ text label ] ]
-
-        total =
-            minutesRange (List.map (.choices >> List.filterMap (.minutes >> String.toInt)) f.items)
-    in
-    [ h1 []
-        [ text
-            (if f.id == Nothing then
-                "Новый пресет"
-
-             else
-                "Пресет"
-            )
-        ]
-    , label [ class "field" ]
-        [ span [] [ text "Название" ]
-        , input [ value f.name, onInput PrName, placeholder "Ежедневный" ] []
-        ]
-    , div [ class "field" ]
-        [ span [] [ text ("Упражнения · " ++ total) ]
-        , div [ class "list" ] (List.indexedMap (viewPresetItem model.drag (List.length f.items) exerciseOptions) f.items)
-        , button [ class "btn secondary wide", onClick TogglePicker ] [ text "+ Добавить упражнение" ]
-        , if model.picker then
-            div [ class "list" ]
-                (span [ class "muted small" ] [ text "Случайный вариант из группы" ]
-                    :: List.map pickRow randomChoices
-                    ++ (if List.isEmpty addable then
-                            []
-
-                        else
-                            span [ class "muted small" ] [ text "Конкретное упражнение" ] :: List.map pickRow addable
-                       )
-                )
 
           else
-            text ""
-        ]
-    , viewNotice model
-    , button [ class "btn big", onClick SavePreset ] [ text "Сохранить" ]
-    , case f.id of
-        Just id ->
-            button [ class "link danger", onClick (DeletePreset id) ] [ text "Удалить пресет" ]
+            []
+         )
+            ++ List.map row byRecency
+        )
+    , case model.store.exercises of
+        [] ->
+            p [ class "muted" ] [ text "Список пуст. Впиши название сверху — упражнение появится со стартом на текущем темпе." ]
 
-        Nothing ->
+        [ _ ] ->
             text ""
+
+        _ ->
+            button [ class "ghost wide", onClick (Act Suggest) ] [ text "🎲 подсказать" ]
+    , p [ class "muted small" ] [ text "Число справа — стартовый темп, ± меняет его на 5." ]
     ]
 
 
-viewPresetItem : Maybe Drag -> Int -> (Int -> Int -> FormChoice -> List (Html Msg)) -> Int -> FormSlot -> Html Msg
-viewPresetItem drag count exerciseOptions i slot =
-    let
-        px v =
-            "translateY(" ++ String.fromFloat v ++ "px)"
-
-        ( dragging, shift ) =
-            case drag of
-                Just d ->
-                    let
-                        target =
-                            dropIndex d
-
-                        pitch =
-                            (List.drop d.from d.heights |> List.head |> Maybe.withDefault 0) + 8
-                    in
-                    if i == d.from then
-                        ( True, px (d.y - d.startY) )
-
-                    else if d.from < i && i <= target then
-                        ( False, px -pitch )
-
-                    else if target <= i && i < d.from then
-                        ( False, px pitch )
-
-                    else
-                        ( False, "none" )
-
-                Nothing ->
-                    ( False, "none" )
-
-        -- The handle's grandparent is the list: measure every slot.
-        startDrag =
-            D.map2 (\y heights -> ( DragStart i y heights, True ))
-                (D.field "clientY" D.float)
-                (List.range 0 (count - 1)
-                    |> List.map (\n -> D.at [ "currentTarget", "parentElement", "parentElement", "children", String.fromInt n, "offsetHeight" ] D.float)
-                    |> List.foldr (D.map2 (::)) (D.succeed [])
-                )
-
-        viewChoice j choice =
-            div [ class "choice-row" ]
-                [ select [ onInput (PrChoiceExercise i j) ] (exerciseOptions i j choice)
-                , input
-                    [ type_ "number"
-                    , attribute "inputmode" "numeric"
-                    , class "minutes"
-                    , value choice.minutes
-                    , onInput (PrChoiceMinutes i j)
-                    ]
-                    []
-                , span [ class "muted" ] [ text "мин" ]
-                , button [ class "icon-btn danger", onClick (PrChoiceRemove i j) ] [ text "✕" ]
-                ]
-    in
-    div
-        [ classList
-            [ ( "preset-item", True )
-            , ( "multi", List.length slot.choices > 1 )
-            , ( "dragging", dragging )
-            , ( "settling", drag /= Nothing && not dragging )
-            ]
-        , style "transform" shift
+viewEdit : EditState -> List (Html Msg)
+viewEdit { form, confirmDelete, error } =
+    [ label [ class "field" ]
+        [ span [] [ text "Название" ]
+        , input [ type_ "text", value form.name, onInput FormName ] []
         ]
-        [ span
-            [ class "drag-handle"
-            , preventDefaultOn "pointerdown" startDrag
-
-            -- Touch pointers are implicitly captured by the handle, so its own
-            -- move/up events keep coming while the finger leaves it.
-            , on "pointermove" (D.map DragMove (D.field "clientY" D.float))
-            , on "pointerup" (D.succeed DragEnd)
-            , on "pointercancel" (D.succeed DragEnd)
+    , div [ class "field" ]
+        [ span [] [ text "Стартовый темп" ]
+        , div [ class "bpm-edit" ]
+            [ button [ class "key", onClick (FormBpmBump -5) ] [ text "−5" ]
+            , input [ type_ "number", attribute "inputmode" "numeric", value form.bpm, onInput FormBpm ] []
+            , button [ class "key", onClick (FormBpmBump 5) ] [ text "+5" ]
             ]
-            [ text "⠿" ]
-        , div [ class "slot-body" ]
-            (List.indexedMap viewChoice slot.choices
-                ++ [ button [ class "add-choice", onClick (PrAddChoice i) ] [ text "+ или…" ] ]
+        ]
+    , div [ class "field" ]
+        [ span [] [ text "Доли" ]
+        , div [ class "segmented" ]
+            (List.map
+                (\sub ->
+                    button [ classList [ ( "on", form.subdivision == sub ) ], onClick (FormSubdivision sub) ]
+                        [ text (Format.subdivision sub) ]
+                )
+                Exercise.subdivisions
             )
         ]
+    , label [ class "field" ]
+        [ span [] [ text "Видео (ссылка YouTube)" ]
+        , input [ type_ "url", value form.video, onInput FormVideo, placeholder "https://youtu.be/…" ] []
+        ]
+    , if String.trim form.video /= "" && Exercise.youtubeId form.video == Nothing then
+        p [ class "muted small" ] [ text "Это не YouTube: встроить не получится, будет просто ссылка." ]
+
+      else
+        text ""
+    , viewMessage error
+    , button [ class "primary wide", onClick SaveForm ] [ text "Сохранить" ]
+    , if confirmDelete then
+        button [ class "danger wide", onClick (Act (DeleteExercise form.id)) ] [ text "Точно удалить? История останется" ]
+
+      else
+        button [ class "ghost wide", onClick AskDelete ] [ text "Удалить" ]
+    ]
 
 
+viewMessage : Maybe String -> Html msg
+viewMessage message =
+    case message of
+        Just m ->
+            p [ class "notice" ] [ text m ]
 
--- VIEW: STATS
-
-
-{-| (day label, practice millis) for the last `n` days, oldest first.
--}
-lastDays : Model -> Int -> List ( String, Int )
-lastDays model n =
-    let
-        byDay =
-            Domain.minutesByDay model.zone model.store.sessions
-
-        dayMs =
-            24 * 60 * 60 * 1000
-    in
-    List.range 0 (n - 1)
-        |> List.reverse
-        |> List.map
-            (\offset ->
-                let
-                    t =
-                        model.now - offset * dayMs
-                in
-                ( String.fromInt (Time.toDay model.zone (Time.millisToPosix t))
-                , Dict.get (Domain.dayKey model.zone t) byDay |> Maybe.withDefault 0
-                )
-            )
+        Nothing ->
+            text ""
 
 
 viewStats : Model -> List (Html Msg)
 viewStats model =
     let
-        sessions =
-            model.store.sessions
+        segments =
+            Store.allSegments model.now model.store
 
-        days =
-            lastDays model 14
+        byDay =
+            Stats.msByDay model.zone segments
 
-        maxDay =
-            days |> List.map Tuple.second |> List.maximum |> Maybe.withDefault 0 |> max 1
+        today =
+            Format.startOfDay model.zone model.now
+
+        -- Noon avoids DST edges when stepping back whole days.
+        day offset =
+            today - offset * Format.dayMs + Format.dayMs // 2
+
+        onDay offset =
+            Dict.get (Stats.dayKey model.zone (day offset)) byDay |> Maybe.withDefault 0
+
+        sumDays n =
+            List.range 0 (n - 1) |> List.map onDay |> List.sum
+
+        bars =
+            List.range 0 13 |> List.reverse |> List.map (\o -> ( day o, onDay o ))
+
+        peak =
+            bars |> List.map Tuple.second |> List.maximum |> Maybe.withDefault 0 |> Basics.max 1
+
+        recent =
+            List.filter (\s -> s.startedAt >= today - 29 * Format.dayMs) segments
 
         totals =
-            Domain.exerciseTotals sessions
+            Stats.exerciseTotals recent
 
-        all =
-            Dict.values totals |> List.sum
-
-        -- Generic exercises with time rolled up from their variants.
-        groups =
-            Domain.grouped model.store.exercises
-                |> List.filterMap
-                    (\( top, variants ) ->
-                        case List.filter (\e -> Dict.member e.id totals) (top :: variants) of
-                            [] ->
-                                Nothing
-
-                            members ->
-                                Just ( top, members, List.filterMap (\e -> Dict.get e.id totals) members |> List.sum )
-                    )
-                |> List.sortBy (\( _, _, ms ) -> negate ms)
-
-        bpmHistory ex =
-            if ex.metronome then
-                viewBpmHistory (Domain.topBpmHistory ex.id sessions)
-
-            else
-                text ""
-
-        viewVariantStats ex =
-            [ div [ class "row spread variant-stat" ]
-                [ span []
-                    [ text
-                        (if ex.parentId == Nothing then
-                            "общее"
-
-                         else
-                            ex.name
+        rows =
+            (Dict.toList totals.byExercise
+                |> List.map
+                    (\( id, ms ) ->
+                        ( Store.findExercise model.store id |> Maybe.map .name |> Maybe.withDefault "(удалено)"
+                        , ms
+                        , Stats.latestTopBpm id segments
                         )
-                    ]
-                , span [ class "muted" ] [ text (Dict.get ex.id totals |> Maybe.withDefault 0 |> duration) ]
-                ]
-            , bpmHistory ex
-            ]
+                    )
+            )
+                ++ (if totals.free > 0 then
+                        [ ( "Без упражнения", totals.free, Nothing ) ]
+
+                    else
+                        []
+                   )
+                |> List.sortBy (\( _, ms, _ ) -> negate ms)
     in
-    [ h1 [] [ text "Статистика" ]
-    , div [ class "tiles" ]
-        [ tile "7 дней" (duration (lastDays model 7 |> List.map Tuple.second |> List.sum))
-        , tile "Всего" (duration all)
-        , tile "Сессий" (String.fromInt (List.length sessions))
+    [ div [ class "tiles" ]
+        [ tile "сегодня" (Format.duration (sumDays 1))
+        , tile "7 дней" (Format.duration (sumDays 7))
+        , tile "30 дней" (Format.duration (sumDays 30))
         ]
-    , h2 [] [ text "Последние 14 дней" ]
     , div [ class "bars" ]
         (List.map
-            (\( label, ms ) ->
-                div [ class "bar-col" ]
-                    [ div [ class "bar-val" ]
-                        [ text
-                            (if ms > 0 then
-                                String.fromInt (ms // 60000)
-
-                             else
-                                ""
-                            )
-                        ]
-                    , div [ class "bar-track" ]
-                        [ div [ class "bar", style "height" (String.fromFloat (100 * toFloat ms / toFloat maxDay) ++ "%") ] [] ]
-                    , div [ class "bar-label" ] [ text label ]
+            (\( t, ms ) ->
+                div [ class "bar" ]
+                    [ div [ class "bar-track" ]
+                        [ div [ class "bar-fill", style "height" (String.fromFloat (100 * toFloat ms / toFloat peak) ++ "%") ] [] ]
+                    , small [] [ text (Format.weekday model.zone t) ]
                     ]
             )
-            days
+            bars
         )
-    , h2 [] [ text "Упражнения" ]
-    , if List.isEmpty groups then
-        p [ class "muted" ] [ text "Пока пусто. Иди играть!" ]
+    , h2 [] [ text "За 30 дней" ]
+    , if List.isEmpty rows then
+        p [ class "muted" ] [ text "Пока пусто." ]
 
       else
         div [ class "list" ]
             (List.map
-                (\( top, members, ms ) ->
-                    div [ class "card ex-stat" ]
-                        (div [ class "row spread" ]
-                            [ div [ class "card-title" ] [ text top.name ]
-                            , div [] [ text (duration ms) ]
-                            ]
-                            :: (case members of
-                                    [ only ] ->
-                                        if only.id == top.id then
-                                            [ bpmHistory top ]
+                (\( name, ms, top ) ->
+                    div [ class "row static" ]
+                        [ span [ class "row-name" ] [ text name ]
+                        , span [ class "row-meta" ]
+                            [ text (Format.duration ms)
+                            , case top of
+                                Just t ->
+                                    small [] [ text ("рекорд " ++ String.fromInt (Bpm.toInt t)) ]
 
-                                        else
-                                            viewVariantStats only
-
-                                    _ ->
-                                        List.concatMap viewVariantStats members
-                               )
-                        )
-                )
-                groups
-            )
-    , h2 [] [ text "История" ]
-    , div [ class "list" ]
-        (sessions
-            |> List.take 30
-            |> List.map
-                (\s ->
-                    a [ class "row-btn", href (routeHref (Summary s.id)) ]
-                        [ span [] [ text (dateLabel model.zone s.startedAt) ]
-                        , span [ class "muted" ]
-                            [ text
-                                ((s.presetId |> Maybe.andThen (findPreset model.store) |> Maybe.map (\pr -> pr.name ++ " · ") |> Maybe.withDefault "")
-                                    ++ duration (Domain.sessionTotal s)
-                                )
+                                Nothing ->
+                                    text ""
                             ]
                         ]
                 )
-        )
+                rows
+            )
     ]
 
 
-{-| Top BPM per session as a sparkline, with first → latest values.
--}
-viewBpmHistory : List ( Int, Int ) -> Html msg
-viewBpmHistory history =
+tile : String -> String -> Html msg
+tile label value =
+    div [ class "tile" ] [ b [] [ text value ], small [] [ text label ] ]
+
+
+viewSettings : Model -> SettingsState -> List (Html Msg)
+viewSettings model state =
     let
-        bpms =
-            List.map Tuple.second history
-
-        lo =
-            List.minimum bpms |> Maybe.withDefault 0
-
-        hi =
-            List.maximum bpms |> Maybe.withDefault 0
-
-        w =
-            300
-
-        h =
-            48
-
-        n =
-            List.length bpms
-
-        x i =
-            if n <= 1 then
-                toFloat w / 2
-
-            else
-                toFloat i * toFloat w / toFloat (n - 1)
-
-        y b =
-            if hi == lo then
-                toFloat h / 2
-
-            else
-                4 + (toFloat (hi - b) / toFloat (hi - lo)) * toFloat (h - 8)
-
-        points =
-            List.indexedMap (\i b -> String.fromFloat (x i) ++ "," ++ String.fromFloat (y b)) bpms
-                |> String.join " "
+        settings =
+            model.store.settings
     in
-    case ( List.head bpms, List.reverse bpms |> List.head ) of
-        ( Just first, Just latest ) ->
-            div [ class "spark" ]
-                [ if n < 2 then
-                    text ""
-
-                  else
-                    Svg.svg [ SA.viewBox ("0 0 " ++ String.fromInt w ++ " " ++ String.fromInt h), SA.preserveAspectRatio "none" ]
-                        [ Svg.polyline [ SA.points points, SA.fill "none", SA.stroke "currentColor", SA.strokeWidth "2", attribute "vector-effect" "non-scaling-stroke" ] []
-                        ]
-                , div [ class "muted small" ]
-                    [ text
-                        ("макс BPM "
-                            ++ String.fromInt first
-                            ++ " → "
-                            ++ String.fromInt latest
-                            ++ " · лучший "
-                            ++ String.fromInt hi
-                            ++ " · "
-                            ++ String.fromInt n
-                            ++ " "
-                            ++ plural n "сессия" "сессии" "сессий"
-                        )
+    [ h2 [] [ text "Тема" ]
+    , div [ class "themes" ]
+        (List.map
+            (\t ->
+                button
+                    [ classList [ ( "swatch", True ), ( "on", settings.theme == t ) ]
+                    , attribute "data-swatch" (Theme.id t)
+                    , onClick (SetTheme t)
                     ]
-                ]
-
-        _ ->
-            text ""
-
-
-
--- VIEW: SETTINGS
-
-
-viewSettings : Model -> List (Html Msg)
-viewSettings model =
-    [ h1 [] [ text "Настройки" ]
-    , label [ class "field" ]
-        [ span [] [ text ("Громкость клика · " ++ String.fromInt (round (model.store.settings.volume * 100)) ++ "%") ]
-        , input
-            [ type_ "range"
-            , Html.Attributes.min "0"
-            , Html.Attributes.max "1"
-            , Html.Attributes.step "0.05"
-            , value (String.fromFloat model.store.settings.volume)
-            , onInput (String.toFloat >> Maybe.withDefault 0.8 >> SetVolume)
-            ]
-            []
+                    [ span [ class "swatch-dot" ] [], text (Theme.name t) ]
+            )
+            Theme.all
+        )
+    , h2 [] [ text ("Громкость клика · " ++ String.fromInt (round (settings.volume * 100)) ++ "%") ]
+    , input
+        [ type_ "range"
+        , class "range"
+        , Html.Attributes.min "0"
+        , Html.Attributes.max "1"
+        , step "0.05"
+        , value (String.fromFloat settings.volume)
+        , onInput (String.toFloat >> Maybe.withDefault 0.8 >> SetVolume)
         ]
+        []
     , h2 [] [ text "Резервная копия" ]
-    , p [ class "muted small" ] [ text "Все данные хранятся только на этом телефоне. Время от времени делай экспорт, чтобы их не потерять." ]
-    , div [ class "row" ]
-        [ button [ class "btn secondary", onClick Export ] [ text "Экспорт" ]
-        , button [ class "btn secondary", onClick ImportFile ] [ text "Импорт из файла" ]
+    , p [ class "muted small" ] [ text "Всё хранится только на этом телефоне. Иногда делай экспорт." ]
+    , div [ class "pair" ]
+        [ button [ class "ghost", onClick Export ] [ text "Экспорт" ]
+        , button [ class "ghost", onClick ImportFile ] [ text "Импорт файла" ]
         ]
     , h2 [] [ text "Вставить JSON" ]
     , p [ class "muted small" ]
-        [ text "Добавляет или обновляет упражнения и пресеты (по названию). История не меняется. Полная резервная копия заменяет всё." ]
-    , textarea [ class "paste", value model.importText, onInput ImportTextChanged, rows 6, placeholder importExample ] []
-    , viewNotice model
-    , button [ class "btn", onClick ApplyImport, disabled (String.trim model.importText == "") ] [ text "Импортировать" ]
-    , details []
-        [ summary [ class "muted" ] [ text "Формат" ]
-        , pre [ class "code" ] [ text importExample ]
+        [ text "Список упражнений добавляется по названию: "
+        , code [] [ text "{\"exercises\": [{\"name\": \"…\", \"bpm\": 90, \"video\": \"…\"}]}" ]
+        , text ". Резервная копия заменяет всё."
         ]
+    , textarea [ class "paste", value state.importText, onInput ImportTextChanged, rows 5 ] []
+    , viewMessage state.message
+    , button
+        [ class "primary wide"
+        , onClick (Act (ApplyImport state.importText))
+        , disabled (String.trim state.importText == "")
+        ]
+        [ text "Импортировать" ]
     ]
 
 
-importExample : String
-importExample =
-    """{
-  "exercises": [
-    { "name": "Am", "parent": "Свип-арпеджио", "bpm": 90,
-      "subdivision": 3, "notes": "5 струн" }
-  ],
-  "presets": [
-    { "name": "Ежедневный", "items": [
-      { "exercise": "Легато · Workout", "minutes": 3 },
-      { "exercise": "Свип-арпеджио · Am", "minutes": 10 },
-      { "choices": [
-        { "exercise": "Секвенция", "random": true, "minutes": 8 },
-        { "exercise": "Лик · Blues", "minutes": 5 }
-      ] }
-    ] }
-  ]
-}"""
+
+-- ICONS
+
+
+type Icon
+    = Chart
+    | Gear
+    | Pencil
+    | Cross
+
+
+icon : Icon -> Html msg
+icon kind =
+    Svg.svg
+        [ SA.viewBox "0 0 24 24"
+        , SA.width "22"
+        , SA.height "22"
+        , SA.fill "none"
+        , SA.stroke "currentColor"
+        , SA.strokeWidth "2"
+        , SA.strokeLinecap "round"
+        , SA.strokeLinejoin "round"
+        ]
+        (case kind of
+            Chart ->
+                [ Svg.path [ SA.d "M5 20V11M12 20V4M19 20v-6" ] [] ]
+
+            Gear ->
+                [ Svg.circle [ SA.cx "12", SA.cy "12", SA.r "3" ] []
+                , Svg.path [ SA.d "M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1L7 17M17 7l2.1-2.1" ] []
+                ]
+
+            Pencil ->
+                [ Svg.path [ SA.d "M4 20h4L19 9l-4-4L4 16v4zM13.5 6.5l4 4" ] [] ]
+
+            Cross ->
+                [ Svg.path [ SA.d "M6 6l12 12M18 6L6 18" ] [] ]
+        )
 
 
 
@@ -2645,21 +1313,16 @@ importExample =
 subscriptions : Model -> Sub Msg
 subscriptions model =
     Sub.batch
-        [ if model.store.live /= Nothing then
+        [ if Store.isRunning model.store then
             Time.every 250 (\_ -> Act Tick)
 
-          else
-            Time.every 30000 (\_ -> Act Tick)
-
-        -- A mouse isn't captured by the drag handle; follow it document-wide.
-        , if model.drag /= Nothing then
-            Sub.batch
-                [ Browser.Events.onMouseMove (D.map DragMove (D.field "clientY" D.float))
-                , Browser.Events.onMouseUp (D.succeed DragEnd)
-                ]
+          else if model.store.live /= Nothing then
+            -- Notice a session going idle while the app stays open.
+            Time.every 60000 (\_ -> Act Tick)
 
           else
             Sub.none
+        , Browser.Events.onVisibilityChange VisibilityChanged
         ]
 
 

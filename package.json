@@ -8,11 +8,15 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "elm-test",
-    "format": "elm-format --yes src tests"
+    "format": "elm-format --yes src tests",
+    "review": "elm-review",
+    "e2e": "vite build && node e2e/run.mjs"
   },
   "devDependencies": {
+    "@fontsource-variable/nunito": "^5.3.0",
     "elm": "0.19.1-6",
     "elm-format": "^0.8.8",
+    "elm-review": "^2.13.5",
     "elm-test": "0.19.1-revision16",
     "typescript": "^7.0.2",
     "vite": "^8.3.5",

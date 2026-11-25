@@ -194,14 +194,14 @@ suite =
                         |> Result.map
                             (\s ->
                                 ( ( totalMs (Store.allSegments 0 s), Session.exerciseId s.deck, tempo s )
-                                , ( s.settings.theme, List.map .video s.exercises, List.map .subdivision s.exercises )
+                                , ( ( s.settings.dayTheme, s.settings.nightTheme ), List.map .video s.exercises, List.map .subdivision s.exercises )
                                 , allSegments s |> List.map (.topBpm >> Maybe.map Bpm.toInt)
                                 )
                             )
                         |> Expect.equal
                             (Ok
                                 ( ( 900000 + 600000 + 180000 + 252000, Just "e1", 93 )
-                                , ( Theme.Forest, [ Just "https://youtu.be/dQw4w9WgXcQ", Nothing ], [ Quarter, Eighth ] )
+                                , ( ( Theme.Forest, Theme.Forest ), [ Just "https://youtu.be/dQw4w9WgXcQ", Nothing ], [ Quarter, Eighth ] )
                                 , [ Just 110, Nothing ]
                                 )
                             )
@@ -219,15 +219,15 @@ suite =
                     decodeV2
                         """{"version":2,"exercises":[{"id":"x","name":"X","startBpm":0,"subdivision":0,"video":""}],
                             "sessions":[],"live":null,"deck":{"exerciseId":"gone","bpm":999,"subdivision":7,"clickOn":true},
-                            "settings":{"volume":5,"theme":"neon"}}"""
+                            "settings":{"volume":5,"dayTheme":"neon","nightTheme":"night"}}"""
                         |> Result.map
                             (\s ->
                                 ( List.map (\e -> ( Bpm.toInt e.startBpm, e.subdivision )) s.exercises
                                 , ( Session.exerciseId s.deck, tempo s, Session.freeSubdivision s.deck )
-                                , ( s.settings.volume, s.settings.theme )
+                                , ( s.settings.volume, s.settings.dayTheme, s.settings.nightTheme )
                                 )
                             )
-                        |> Expect.equal (Ok ( [ ( 20, Quarter ) ], ( Nothing, 400, Quarter ), ( 1, Theme.Lamp ) ))
+                        |> Expect.equal (Ok ( [ ( 20, Quarter ) ], ( Nothing, 400, Quarter ), ( 1, Theme.Lamp, Theme.Night ) ))
             , test "a v2 backup imports as a full replacement" <|
                 \_ ->
                     case Store.decodeImport (E.encode 0 (Store.encode fresh)) of

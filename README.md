@@ -28,7 +28,9 @@ Live: https://jeaciaz.github.io/guitar-training/ (on Android Chrome: menu → "I
   in a new tab.
 - **Stats**: today / 7 / 30 days, the last 14 days, and time and latest top
   BPM (held ≥10 s) per exercise over 30 days.
-- **Themes**: Лампа, Хвоя, Песок, Графит (Settings).
+- **Themes**: ten (light: Песок, Бумага, Мята; warm dark: Лампа, Шоколад,
+  Вино, Хвоя; cold dark: Графит, Ночь, Сталь). Settings pick one for the
+  day and one for the evening; they follow the phone's light/dark mode.
 - **Data** lives in the phone's localStorage under `guitar-training-v2`.
   Settings → Export / Import file for backups.
 

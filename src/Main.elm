@@ -46,6 +46,11 @@ port wakeLock : Bool -> Cmd msg
 port theme : String -> Cmd msg
 
 
+{-| Whether the phone is in dark mode, whenever that changes.
+-}
+port systemDark : (Bool -> msg) -> Sub msg
+
+
 
 -- MODEL
 
@@ -60,6 +65,7 @@ type alias Model =
     , zone : Time.Zone
     , videoOpen : Bool
     , startupNotice : Maybe String
+    , systemDark : Bool
     }
 
 
@@ -108,13 +114,23 @@ type alias Form =
 type alias SettingsState =
     { importText : String
     , message : Maybe String
+    , themeSlot : ThemeSlot
     }
+
+
+{-| Which theme the settings are editing: the one for the phone's light
+mode or for its dark mode.
+-}
+type ThemeSlot
+    = Day
+    | Night
 
 
 type alias Flags =
     { stored : Maybe String
     , legacy : Maybe String
     , now : Int
+    , systemDark : Bool
     }
 
 
@@ -144,20 +160,24 @@ init flags url key =
 
         store =
             Store.closeIfIdle flags.now loaded
+
+        model =
+            { key = key
+            , page = pageFor store flags.systemDark (parseRoute url)
+            , pushed = False
+            , store = store
+            , persistence = persistence
+            , now = flags.now
+            , zone = Time.utc
+            , videoOpen = False
+            , startupNotice = notice
+            , systemDark = flags.systemDark
+            }
     in
-    ( { key = key
-      , page = pageFor store (parseRoute url)
-      , pushed = False
-      , store = store
-      , persistence = persistence
-      , now = flags.now
-      , zone = Time.utc
-      , videoOpen = False
-      , startupNotice = notice
-      }
+    ( model
     , Cmd.batch
         [ Task.perform GotZone Time.here
-        , theme (Theme.id store.settings.theme)
+        , theme (Theme.id (shownTheme model))
         , if persistence == Persist then
             saveState (Store.encode store)
 
@@ -219,8 +239,8 @@ routeHref route =
            )
 
 
-pageFor : Store -> Route -> Page
-pageFor store route =
+pageFor : Store -> Bool -> Route -> Page
+pageFor store dark route =
     case route of
         HomeRoute ->
             Home
@@ -250,7 +270,7 @@ pageFor store route =
             Stats
 
         SettingsRoute ->
-            Settings { importText = "", message = Nothing }
+            Settings { importText = "", message = Nothing, themeSlot = slotFor dark }
 
 
 {-| Back to the previous screen: `back` when we navigated here (so Android's
@@ -304,7 +324,9 @@ type Msg
     | FormVideo String
     | SaveForm
     | AskDelete
-    | SetTheme Theme
+    | SetTheme ThemeSlot Theme
+    | PickThemeSlot ThemeSlot
+    | SystemDarkChanged Bool
     | SetVolume Float
     | Export
     | ImportFile
@@ -342,8 +364,8 @@ effects old new =
 
           else
             Cmd.none
-        , if old.store.settings.theme /= new.store.settings.theme then
-            theme (Theme.id new.store.settings.theme)
+        , if shownTheme old /= shownTheme new then
+            theme (Theme.id (shownTheme new))
 
           else
             Cmd.none
@@ -410,7 +432,7 @@ updateModel msg model =
                     parseRoute url
             in
             ( { model
-                | page = pageFor model.store route
+                | page = pageFor model.store model.systemDark route
                 , pushed = model.pushed && route /= HomeRoute
                 , startupNotice = Nothing
               }
@@ -506,8 +528,14 @@ updateModel msg model =
                 _ ->
                     ( model, Cmd.none )
 
-        SetTheme t ->
-            ( mapSettings (\s -> { s | theme = t }) model, Cmd.none )
+        SetTheme slot t ->
+            ( mapSettings (setSlotTheme slot t) model, Cmd.none )
+
+        PickThemeSlot slot ->
+            ( mapSettingsPage (\p -> { p | themeSlot = slot }) model, Cmd.none )
+
+        SystemDarkChanged dark ->
+            ( { model | systemDark = dark }, Cmd.none )
 
         SetVolume v ->
             ( mapSettings (\s -> { s | volume = clamp 0 1 v }) model, Cmd.none )
@@ -720,6 +748,48 @@ search query exercises =
 
 
 -- HELPERS
+
+
+slotFor : Bool -> ThemeSlot
+slotFor dark =
+    if dark then
+        Night
+
+    else
+        Day
+
+
+slotTheme : ThemeSlot -> Store.Settings -> Theme
+slotTheme slot settings =
+    case slot of
+        Day ->
+            settings.dayTheme
+
+        Night ->
+            settings.nightTheme
+
+
+setSlotTheme : ThemeSlot -> Theme -> Store.Settings -> Store.Settings
+setSlotTheme slot t settings =
+    case slot of
+        Day ->
+            { settings | dayTheme = t }
+
+        Night ->
+            { settings | nightTheme = t }
+
+
+{-| The theme on screen: the one for the phone's current mode, or, while the
+settings are open, the one being edited (as a preview).
+-}
+shownTheme : Model -> Theme
+shownTheme model =
+    case model.page of
+        Settings { themeSlot } ->
+            slotTheme themeSlot model.store.settings
+
+        _ ->
+            slotTheme (slotFor model.systemDark) model.store.settings
 
 
 mapStore : (Store -> Store) -> Model -> Model
@@ -1218,15 +1288,32 @@ viewSettings model state =
     let
         settings =
             model.store.settings
+
+        tabLabel slot label =
+            if slotFor model.systemDark == slot then
+                label ++ " · сейчас"
+
+            else
+                label
     in
     [ h2 [] [ text "Тема" ]
+    , div [ class "segmented" ]
+        (List.map
+            (\( slot, label ) ->
+                button [ classList [ ( "on", state.themeSlot == slot ) ], onClick (PickThemeSlot slot) ]
+                    [ text (tabLabel slot label) ]
+            )
+            [ ( Day, "☀ Днём" ), ( Night, "☾ Вечером" ) ]
+        )
+    , p [ class "muted small" ] [ text "Переключаются вместе со светлой и тёмной темой телефона." ]
     , div [ class "themes" ]
         (List.map
             (\t ->
+                -- Each swatch carries its own theme, so it shows that palette.
                 button
-                    [ classList [ ( "swatch", True ), ( "on", settings.theme == t ) ]
-                    , attribute "data-swatch" (Theme.id t)
-                    , onClick (SetTheme t)
+                    [ classList [ ( "swatch", True ), ( "on", slotTheme state.themeSlot settings == t ) ]
+                    , attribute "data-theme" (Theme.id t)
+                    , onClick (SetTheme state.themeSlot t)
                     ]
                     [ span [ class "swatch-dot" ] [], text (Theme.name t) ]
             )
@@ -1323,6 +1410,7 @@ subscriptions model =
           else
             Sub.none
         , Browser.Events.onVisibilityChange VisibilityChanged
+        , systemDark SystemDarkChanged
         ]
 
 

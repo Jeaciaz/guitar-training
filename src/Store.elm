@@ -47,9 +47,13 @@ import Session exposing (Deck, Live, Segment, Session)
 import Theme exposing (Theme)
 
 
+{-| `dayTheme` applies while the phone is in light mode, `nightTheme` in dark
+mode.
+-}
 type alias Settings =
     { volume : Float
-    , theme : Theme
+    , dayTheme : Theme
+    , nightTheme : Theme
     }
 
 
@@ -75,7 +79,7 @@ empty =
     , sessions = []
     , live = Nothing
     , deck = Session.newDeck
-    , settings = { volume = 0.8, theme = Theme.Lamp }
+    , settings = { volume = 0.8, dayTheme = Theme.Sand, nightTheme = Theme.Lamp }
     }
 
 
@@ -276,7 +280,8 @@ encode store =
         , ( "settings"
           , E.object
                 [ ( "volume", E.float store.settings.volume )
-                , ( "theme", Theme.encode store.settings.theme )
+                , ( "dayTheme", Theme.encode store.settings.dayTheme )
+                , ( "nightTheme", Theme.encode store.settings.nightTheme )
                 ]
           )
         ]
@@ -301,9 +306,11 @@ decoder =
                         (D.field "live" (D.nullable (D.map Session.restore Session.liveDecoder)))
                         (D.field "deck" Session.deckDecoder)
                         (D.field "settings"
-                            (D.map2 Settings
+                            (D.map3 Settings
                                 (D.field "volume" (D.map (clamp 0 1) D.float))
-                                (D.field "theme" Theme.decoder)
+                                -- Data from before day/night themes has one `theme` for both.
+                                (D.oneOf [ D.field "dayTheme" Theme.decoder, D.field "theme" Theme.decoder ])
+                                (D.oneOf [ D.field "nightTheme" Theme.decoder, D.field "theme" Theme.decoder ])
                             )
                         )
                         |> D.map dropDanglingDeck
@@ -344,7 +351,7 @@ legacyDecoder =
                     (sessions ++ live)
                         |> List.filter (not << List.isEmpty << .segments)
                         |> List.sortBy (.startedAt >> negate)
-                , settings = { volume = clamp 0 1 volume, theme = empty.settings.theme }
+                , settings = { volume = clamp 0 1 volume, dayTheme = empty.settings.dayTheme, nightTheme = empty.settings.nightTheme }
             }
         )
         (lenient "sessions" (lenientList legacySession) [])

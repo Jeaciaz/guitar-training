@@ -1,11 +1,69 @@
-/* Themes: every colour comes from these tokens. `lamp` is the default. */
-:root,
-:root[data-theme="lamp"] {
+/* Themes: every colour comes from these tokens, set on <html> for the app
+   and on each settings swatch so it previews its own palette. Every theme
+   defines the full set, since a swatch must not inherit the page's. */
+
+/* light */
+[data-theme="sand"] {
+  --fg: #3a2a20;
+  --muted: rgba(58, 42, 32, 0.6);
+  --glass: rgba(58, 42, 32, 0.07);
+  --glass-2: rgba(58, 42, 32, 0.13);
+  --track: rgba(58, 42, 32, 0.13);
+  --danger: #b8442f;
+  color-scheme: light;
+  --acc: #d0643a;
+  --acc-fg: #fff7ef;
+  --inner: rgba(208, 100, 58, 0.11);
+  --bg1: #f6efe4;
+  --bg2: #efe2cf;
+  --bg3: #e8cfb4;
+  --sheet: #f5ecdf;
+}
+
+[data-theme="paper"] {
+  --fg: #22303f;
+  --muted: rgba(34, 48, 63, 0.6);
+  --glass: rgba(34, 48, 63, 0.07);
+  --glass-2: rgba(34, 48, 63, 0.13);
+  --track: rgba(34, 48, 63, 0.13);
+  --danger: #c4423a;
+  color-scheme: light;
+  --acc: #2f6fd0;
+  --acc-fg: #ffffff;
+  --inner: rgba(47, 111, 208, 0.1);
+  --bg1: #f4f6f9;
+  --bg2: #e9eef5;
+  --bg3: #d9e3ef;
+  --sheet: #f1f4f8;
+}
+
+[data-theme="mint"] {
+  --fg: #1f332b;
+  --muted: rgba(31, 51, 43, 0.6);
+  --glass: rgba(31, 51, 43, 0.07);
+  --glass-2: rgba(31, 51, 43, 0.13);
+  --track: rgba(31, 51, 43, 0.13);
+  --danger: #c4423a;
+  color-scheme: light;
+  --acc: #1f9e6e;
+  --acc-fg: #ffffff;
+  --inner: rgba(31, 158, 110, 0.1);
+  --bg1: #f2f8f4;
+  --bg2: #e3f1e8;
+  --bg3: #cfe6d8;
+  --sheet: #eef6f1;
+}
+
+/* warm dark; lamp is the default */
+:root:not([data-theme]),
+[data-theme="lamp"] {
   --fg: #f6ece0;
   --muted: rgba(246, 236, 224, 0.58);
   --glass: rgba(255, 255, 255, 0.07);
   --glass-2: rgba(255, 255, 255, 0.13);
   --track: rgba(255, 255, 255, 0.11);
+  --danger: #f07a6a;
+  color-scheme: dark;
   --acc: #f2a65a;
   --acc-fg: #2b1a0e;
   --inner: rgba(242, 166, 90, 0.12);
@@ -13,13 +71,50 @@
   --bg2: #2b221c;
   --bg3: #4a2f22;
   --sheet: #231d19;
-  --danger: #f07a6a;
-  color-scheme: dark;
 }
 
-:root[data-theme="forest"] {
+[data-theme="chocolate"] {
+  --fg: #f3e6da;
+  --muted: rgba(243, 230, 218, 0.58);
+  --glass: rgba(255, 255, 255, 0.07);
+  --glass-2: rgba(255, 255, 255, 0.13);
+  --track: rgba(255, 255, 255, 0.11);
+  --danger: #f07a6a;
+  color-scheme: dark;
+  --acc: #e9c9a1;
+  --acc-fg: #2a1a12;
+  --inner: rgba(233, 201, 161, 0.1);
+  --bg1: #1a1310;
+  --bg2: #261a15;
+  --bg3: #3a261d;
+  --sheet: #1e1612;
+}
+
+[data-theme="wine"] {
+  --fg: #f6e4e6;
+  --muted: rgba(246, 228, 230, 0.58);
+  --glass: rgba(255, 255, 255, 0.07);
+  --glass-2: rgba(255, 255, 255, 0.13);
+  --track: rgba(255, 255, 255, 0.11);
+  --danger: #f07a6a;
+  color-scheme: dark;
+  --acc: #e0a36b;
+  --acc-fg: #2a1215;
+  --inner: rgba(224, 163, 107, 0.1);
+  --bg1: #1c1114;
+  --bg2: #2c151b;
+  --bg3: #4a1f2a;
+  --sheet: #221418;
+}
+
+[data-theme="forest"] {
   --fg: #eef1e6;
   --muted: rgba(238, 241, 230, 0.58);
+  --glass: rgba(255, 255, 255, 0.07);
+  --glass-2: rgba(255, 255, 255, 0.13);
+  --track: rgba(255, 255, 255, 0.11);
+  --danger: #f07a6a;
+  color-scheme: dark;
   --acc: #e9c46a;
   --acc-fg: #1c2a24;
   --inner: rgba(233, 196, 106, 0.1);
@@ -29,26 +124,15 @@
   --sheet: #17201c;
 }
 
-:root[data-theme="sand"] {
-  --fg: #3a2a20;
-  --muted: rgba(58, 42, 32, 0.6);
-  --glass: rgba(58, 42, 32, 0.07);
-  --glass-2: rgba(58, 42, 32, 0.13);
-  --track: rgba(58, 42, 32, 0.13);
-  --acc: #d0643a;
-  --acc-fg: #fff7ef;
-  --inner: rgba(208, 100, 58, 0.11);
-  --bg1: #f6efe4;
-  --bg2: #efe2cf;
-  --bg3: #e8cfb4;
-  --sheet: #f5ecdf;
-  --danger: #b8442f;
-  color-scheme: light;
-}
-
-:root[data-theme="graphite"] {
+/* cold dark */
+[data-theme="graphite"] {
   --fg: #e8ecef;
-  --muted: rgba(232, 236, 239, 0.56);
+  --muted: rgba(232, 236, 239, 0.58);
+  --glass: rgba(255, 255, 255, 0.07);
+  --glass-2: rgba(255, 255, 255, 0.13);
+  --track: rgba(255, 255, 255, 0.11);
+  --danger: #f07a6a;
+  color-scheme: dark;
   --acc: #6fd3c0;
   --acc-fg: #10201d;
   --inner: rgba(111, 211, 192, 0.08);
@@ -56,6 +140,40 @@
   --bg2: #1a2024;
   --bg3: #22303a;
   --sheet: #161b1f;
+}
+
+[data-theme="night"] {
+  --fg: #e6eefb;
+  --muted: rgba(230, 238, 251, 0.58);
+  --glass: rgba(255, 255, 255, 0.07);
+  --glass-2: rgba(255, 255, 255, 0.13);
+  --track: rgba(255, 255, 255, 0.11);
+  --danger: #f07a6a;
+  color-scheme: dark;
+  --acc: #7fb6ff;
+  --acc-fg: #0d1a2e;
+  --inner: rgba(127, 182, 255, 0.1);
+  --bg1: #0d1422;
+  --bg2: #132038;
+  --bg3: #1c3156;
+  --sheet: #101a2c;
+}
+
+[data-theme="steel"] {
+  --fg: #ececec;
+  --muted: rgba(236, 236, 236, 0.58);
+  --glass: rgba(255, 255, 255, 0.07);
+  --glass-2: rgba(255, 255, 255, 0.13);
+  --track: rgba(255, 255, 255, 0.11);
+  --danger: #f07a6a;
+  color-scheme: dark;
+  --acc: #ff4d4d;
+  --acc-fg: #1a0606;
+  --inner: rgba(255, 77, 77, 0.08);
+  --bg1: #0e0f10;
+  --bg2: #16181a;
+  --bg3: #24272b;
+  --sheet: #131416;
 }
 
 * {
@@ -705,14 +823,17 @@ textarea:focus {
   gap: 8px;
 }
 
+/* A swatch is rendered in its own theme (see the tokens at the top). */
 .swatch {
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 12px 14px;
   border-radius: 16px;
-  background: var(--glass);
+  background: linear-gradient(170deg, var(--bg1), var(--bg3));
+  color: var(--fg);
   font-weight: 700;
+  box-shadow: inset 0 0 0 1px var(--track);
 }
 
 .swatch.on {
@@ -720,26 +841,11 @@ textarea:focus {
 }
 
 .swatch-dot {
-  width: 22px;
-  height: 22px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
   flex-shrink: 0;
-}
-
-[data-swatch="lamp"] .swatch-dot {
-  background: linear-gradient(135deg, #2b221c 50%, #f2a65a 50%);
-}
-
-[data-swatch="forest"] .swatch-dot {
-  background: linear-gradient(135deg, #1c2a24 50%, #e9c46a 50%);
-}
-
-[data-swatch="sand"] .swatch-dot {
-  background: linear-gradient(135deg, #efe2cf 50%, #d0643a 50%);
-}
-
-[data-swatch="graphite"] .swatch-dot {
-  background: linear-gradient(135deg, #1a2024 50%, #6fd3c0 50%);
+  background: var(--acc);
 }
 
 .range {

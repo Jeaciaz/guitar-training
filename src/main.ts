@@ -8,11 +8,14 @@ import { Audio, parseMetronomeCommand } from "./audio";
 const STORAGE_KEY = "guitar-training-v2";
 const LEGACY_KEY = "guitar-training";
 
+const darkMode = window.matchMedia("(prefers-color-scheme: dark)");
+
 const app = Elm.Main.init({
   flags: {
     stored: localStorage.getItem(STORAGE_KEY),
     legacy: localStorage.getItem(LEGACY_KEY),
     now: Date.now(),
+    systemDark: darkMode.matches,
   },
 });
 
@@ -20,8 +23,10 @@ app.ports.saveState.subscribe((state) => {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
 });
 
-// Theme: style.css owns the palette; the browser bar takes the top colour of
-// the theme's gradient.
+// Theme: Elm picks the day or evening theme from the phone's mode; style.css
+// owns the palettes; the browser bar takes the top colour of the gradient.
+
+darkMode.addEventListener("change", (e) => app.ports.systemDark.send(e.matches));
 
 app.ports.theme.subscribe((name) => {
   document.documentElement.dataset.theme = name;

@@ -153,6 +153,35 @@ try {
   expect("migration", "totalMs", r.totalMs, 5563202);
   expect("migration", "legacyKept", r.legacyKept, true);
 
+  const colorScheme = (value) =>
+    cdp.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value }] });
+  await colorScheme("light");
+  await seed("theme=forest&live=0");
+  r = await run("themes", `
+    const shown = () => document.documentElement.dataset.theme;
+    out.start = shown();
+    q('a[href="#/settings"]').click();
+    await waitFor(() => q('.themes'));
+    out.swatches = document.querySelectorAll('.swatch').length;
+    byText('.swatch', 'Бумага').click();
+    await waitFor(() => shown() === 'paper');
+    byText('.segmented button', 'Вечером').click();
+    await waitFor(() => shown() === 'forest');
+    byText('.swatch', 'Ночь').click();
+    await waitFor(() => shown() === 'night');
+    history.back();
+    await waitFor(() => !q('.sheet'));
+    out.closedInLightMode = shown();
+    out.saved = [store().settings.dayTheme, store().settings.nightTheme].join('/');
+  `);
+  expect("themes", "old single theme for both", r.start, "forest");
+  expect("themes", "swatches", r.swatches, 10);
+  expect("themes", "light mode shows day theme", r.closedInLightMode, "paper");
+  expect("themes", "saved", r.saved, "paper/night");
+  await colorScheme("dark");
+  await sleep(500);
+  expect("themes", "dark mode shows evening theme", await cdp.evaluate("document.documentElement.dataset.theme"), "night");
+
   await cdp.send("Page.navigate", { url: BASE });
   await sleep(1500);
   await cdp.evaluate(`localStorage.setItem('guitar-training-v2', '{"version":2,"broken":true}')`);

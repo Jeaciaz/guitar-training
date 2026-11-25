@@ -5,10 +5,15 @@ interface ElmOutPort<T> {
   subscribe(callback: (value: T) => void): void;
 }
 
+interface ElmInPort<T> {
+  send(value: T): void;
+}
+
 interface ElmFlags {
   stored: string | null;
   legacy: string | null;
   now: number;
+  systemDark: boolean;
 }
 
 interface ElmApp {
@@ -17,6 +22,7 @@ interface ElmApp {
     metronome: ElmOutPort<unknown>;
     wakeLock: ElmOutPort<boolean>;
     theme: ElmOutPort<string>;
+    systemDark: ElmInPort<boolean>;
   };
 }
 
